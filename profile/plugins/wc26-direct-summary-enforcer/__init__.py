@@ -146,7 +146,7 @@ def transform_llm_output(**kwargs) -> Optional[str]:
                     error=str(contract_result.get("error") or "")[:500],
                 )
                 deep_research_section = None
-    elif expects_deep_research and not had_deep_research_section:
+    if expects_deep_research and not deep_research_section:
         deep_research_section = deep_research_section_from_latest_artifact(manifest_path)
         if deep_research_section:
             contract_result = run_deep_research_contract(deep_research_section, manifest_path)
@@ -167,7 +167,11 @@ def transform_llm_output(**kwargs) -> Optional[str]:
         else:
             deep_research_section = deep_research_failed_section(
                 manifest_path,
-                reason="no deep-research artifact found for manifest match_id",
+                reason=(
+                    "incoming Deep Research section was not artifact-bound and no cached deep-research artifact was found"
+                    if had_deep_research_section
+                    else "no deep-research artifact found for manifest match_id"
+                ),
             )
 
     result = run_direct_summary(

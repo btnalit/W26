@@ -427,6 +427,46 @@ def test_auto_appends_cached_deep_research_artifact_for_report_like_reply(tmp_pa
     assert f"Deep Research: {artifact}" in result
 
 
+def test_incoming_unbound_deep_research_falls_back_to_cached_artifact(tmp_path, monkeypatch):
+    plugin, _home, workspace = load_plugin(monkeypatch, tmp_path)
+    manifest = workspace / "reports" / "artifacts" / "manifest-M014.json"
+    artifact = workspace / "reports" / "artifacts" / "deep-research-M014-20260606T120000Z.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps({"match_id": "M014"}), encoding="utf-8")
+    artifact.write_text(
+        json.dumps(
+            {
+                "artifact_type": "deep_research",
+                "artifact_version": "1.2",
+                "match_id": "M014",
+                "final_view": {
+                    "direction_label_zh": "研究倾向: 观察受让方",
+                    "action": "NO BET / WATCH",
+                    "why": "cached artifact-backed research is allowed.",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = plugin.transform_llm_output(
+        platform="telegram",
+        session_id="s-unbound-deep-fallback",
+        response_text=(
+            f"WC26 M014 Team A vs Team B — WATCH\nPath A 跨书商扫描\nManifest: {manifest}\n\n"
+            "WC26_DEEP_RESEARCH_FINALIZER: completed\n"
+            "这段没有 Deep Research artifact 路径，不能直接放行。"
+        ),
+    )
+
+    assert result is not None
+    assert result.startswith("CANONICAL SUMMARY")
+    assert "WC26_DEEP_RESEARCH_FINALIZER: completed" in result
+    assert "研究倾向: 观察受让方" in result
+    assert f"Deep Research: {artifact}" in result
+    assert "这段没有 Deep Research artifact 路径" not in result
+
+
 def test_report_like_reply_marks_deep_research_failed_when_no_artifact_exists(tmp_path, monkeypatch):
     plugin, _home, workspace = load_plugin(monkeypatch, tmp_path)
     manifest = workspace / "reports" / "artifacts" / "manifest-M012.json"
@@ -525,7 +565,8 @@ def test_drops_deep_research_section_that_crosses_main_boundary(tmp_path, monkey
 
     assert result is not None
     assert result.startswith("CANONICAL SUMMARY")
-    assert "WC26_DEEP_RESEARCH_FINALIZER" not in result
+    assert "WC26_DEEP_RESEARCH_FINALIZER: failed" in result
+    assert "p_adj 改成 55%" not in result
 
 
 def test_drops_deep_research_section_when_contract_fails(tmp_path, monkeypatch):
@@ -559,7 +600,8 @@ def test_drops_deep_research_section_when_contract_fails(tmp_path, monkeypatch):
 
     assert result is not None
     assert result.startswith("CANONICAL SUMMARY")
-    assert "WC26_DEEP_RESEARCH_FINALIZER" not in result
+    assert "WC26_DEEP_RESEARCH_FINALIZER: failed" in result
+    assert "CONTRACT_FAIL" not in result
 
 
 def test_sanitizes_deep_research_when_only_some_findings_fail_contract(tmp_path, monkeypatch):
@@ -630,7 +672,9 @@ def test_drops_deep_research_freshness_claim_when_contract_missing(tmp_path, mon
 
     assert result is not None
     assert result.startswith("CANONICAL SUMMARY")
-    assert "WC26_DEEP_RESEARCH_FINALIZER" not in result
+    assert "WC26_DEEP_RESEARCH_FINALIZER: failed" in result
+    assert "旧快照在官宣前" not in result
+    assert "市场可能尚未消化" not in result
 
 
 def test_drops_completed_deep_research_without_artifact_path(tmp_path, monkeypatch):
@@ -651,7 +695,8 @@ def test_drops_completed_deep_research_without_artifact_path(tmp_path, monkeypat
 
     assert result is not None
     assert result.startswith("CANONICAL SUMMARY")
-    assert "WC26_DEEP_RESEARCH_FINALIZER" not in result
+    assert "WC26_DEEP_RESEARCH_FINALIZER: failed" in result
+    assert "研究倾向: 观察日本方向" not in result
 
 
 def test_skips_non_telegram_or_missing_manifest(tmp_path, monkeypatch):
