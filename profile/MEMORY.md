@@ -44,6 +44,14 @@
   "watch this side", "wait for this trigger", or "research confirms no-play",
   but they cannot create deterministic actionability without the main report
   already allowing it.
+- Deep Research validation is finding-level. Invalid or time-uncertain news
+  findings are filtered; they do not block the guarded main report. A final
+  Telegram addendum must include a non-empty deep-research artifact path or a
+  short failed status.
+- Market profile is descriptive only and must come from the Path C
+  `consistency_triangle.py` artifact field `market_profile`. LLM research may
+  explain it, but must not recalculate score probabilities or turn the most
+  likely score/result into value.
 - Simulation reports use `mode=simulation` and `final_status=simulation_only`; they are never actionable and never enter CLV/calibration.
 - Uncertainty gate uses root-sum-square `sigma_total`; qualified plays must survive robust EV after the adverse uncertainty stress.
 - Timing is an edge hypothesis. Early structural reports use `T-72h_early`; `T-24h_confirm` and `T-6h_preflight` are monitoring by default; the old `T-1h` check is replaced by `T-60m_lineup_final` and `T-45m_price_guard`.

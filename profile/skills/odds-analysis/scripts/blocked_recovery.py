@@ -586,6 +586,193 @@ def replace_artifact(manifest: dict[str, Any], cap: str, entry: dict[str, Any]) 
     artifacts.append(entry)
 
 
+def remove_skipped_gate(manifest: dict[str, Any], gate_name: str) -> None:
+    skipped = manifest.get("skipped_sections")
+    if isinstance(skipped, list):
+        manifest["skipped_sections"] = [
+            item
+            for item in skipped
+            if not (isinstance(item, dict) and str(item.get("gate") or "") == gate_name)
+        ]
+
+
+def add_artifact_capability(manifest: dict[str, Any], cap: str) -> None:
+    caps = manifest.get("artifact_capabilities")
+    if not isinstance(caps, list):
+        caps = []
+        manifest["artifact_capabilities"] = caps
+    if cap not in {str(item) for item in caps}:
+        caps.append(cap)
+
+
+def source_snapshot_path(snapshot_id: Any) -> Path | None:
+    text = str(snapshot_id or "").strip()
+    if not text:
+        return None
+    direct = resolve_path(text)
+    if direct and direct.exists():
+        return direct
+    candidates = [
+        WORKSPACE / "snapshots" / "odds" / text,
+        WORKSPACE / "snapshots" / "odds" / f"{text}.json",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def manifest_snapshot_candidates(manifest: dict[str, Any]) -> list[Any]:
+    candidates: list[Any] = [manifest.get("snapshot_id")]
+    for artifact in manifest.get("artifacts", []):
+        if not isinstance(artifact, dict):
+            continue
+        if not (artifact_entry_has_cap(artifact, "path_a_crossbook") or artifact_entry_has_cap(artifact, "path_c_consistency")):
+            continue
+        candidates.extend(
+            [
+                artifact.get("source_snapshot_id"),
+                artifact.get("input_snapshot"),
+                artifact.get("snapshot_id"),
+                artifact.get("snapshot_path"),
+            ]
+        )
+        artifact_path = resolve_path(artifact.get("path"))
+        if artifact_path and artifact_path.exists():
+            payload = read_json(artifact_path, {})
+            if isinstance(payload, dict):
+                candidates.extend(
+                    [
+                        payload.get("source_snapshot_id"),
+                        payload.get("input_snapshot"),
+                        payload.get("snapshot_id"),
+                        payload.get("snapshot_path"),
+                    ]
+                )
+    return [item for item in candidates if str(item or "").strip()]
+
+
+def _match_label_matches(payload: dict[str, Any], home: str, away: str) -> bool:
+    raw = str(payload.get("match") or "")
+    normalized = re.sub(r"\s+", " ", raw.replace(" vs ", " ")).strip().lower()
+    forward = re.sub(r"\s+", " ", f"{home} {away}").strip().lower()
+    reverse = re.sub(r"\s+", " ", f"{away} {home}").strip().lower()
+    return normalized in {forward, reverse}
+
+
+def select_consistency_payload(raw: Any, home: str, away: str) -> dict[str, Any] | None:
+    if isinstance(raw, dict):
+        return raw if "error" not in raw else None
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, dict) and _match_label_matches(item, home, away) and "error" not in item:
+                return item
+        for item in raw:
+            if isinstance(item, dict) and "error" not in item:
+                return item
+    return None
+
+
+def try_generate_path_c_artifact(
+    manifest: dict[str, Any],
+    manifest_path: Path,
+    match_id: str,
+    home: str,
+    away: str,
+    timestamp: str,
+    recovery_id: str,
+    *,
+    force: bool = False,
+) -> tuple[dict[str, Any] | None, str]:
+    if not force and "path_c_consistency" in manifest_artifact_caps(manifest):
+        return None, "path_c already present"
+    snapshot_id = None
+    snapshot_path = None
+    for candidate in manifest_snapshot_candidates(manifest):
+        snapshot_path = source_snapshot_path(candidate)
+        if snapshot_path:
+            snapshot_id = candidate
+            break
+    if not snapshot_path:
+        return None, "source odds snapshot unavailable"
+    result = cmd_run(
+        [
+            python_bin(),
+            str(SCRIPTS_DIR / "consistency_triangle.py"),
+            "--snapshot",
+            str(snapshot_path),
+            "--match",
+            f"{home} vs {away}",
+            "--full",
+        ],
+        timeout=120,
+    )
+    if result.returncode != 0:
+        return None, (result.stderr or result.stdout or "consistency_triangle failed").strip()[:500]
+    raw_output = (result.stdout or "").strip()
+    if not raw_output:
+        return None, "consistency_triangle produced no output"
+    try:
+        parsed = json.loads(raw_output)
+    except json.JSONDecodeError as exc:
+        return None, f"consistency_triangle output is not JSON: {exc}"
+    payload = select_consistency_payload(parsed, home, away)
+    if not payload:
+        return None, "no matching consistency payload"
+
+    path = ARTIFACTS_DIR / f"consistency-{match_id}-{timestamp}-recovery.json"
+    payload = dict(payload)
+    payload.setdefault("artifact_id", f"consistency-triangle-{match_id}-legacy-recovered-{timestamp}")
+    payload["artifact_type"] = "consistency_triangle"
+    payload["artifact_kind"] = "consistency_triangle"
+    payload["script"] = "consistency_triangle.py"
+    payload["provides"] = ["path_c_consistency"]
+    payload["snapshot_id"] = str(snapshot_id or snapshot_path.name)
+    payload["snapshot_path"] = str(snapshot_path)
+    payload["match_id"] = match_id
+    payload["status"] = "signal" if (payload.get("signal") or {}).get("type") else "no_signal"
+    payload["generated_by"] = "blocked_recovery"
+    payload["recovery_id"] = recovery_id
+    payload["recovery_action"] = "generate_path_c_consistency"
+    payload["recovery_generated_at_utc"] = utc_now()
+    payload["recovery_input_manifest_path"] = str(manifest_path)
+    write_json(path, payload)
+    entry = {
+        "artifact_id": payload["artifact_id"],
+        "artifact_type": "consistency_triangle",
+        "script": "consistency_triangle.py",
+        "path": str(path),
+        "source_snapshot_id": str(snapshot_id or snapshot_path.name),
+        "provides": ["path_c_consistency"],
+        "status": payload["status"],
+    }
+    return entry, "generated path_c_consistency"
+
+
+def mark_path_c_available(manifest: dict[str, Any], entry: dict[str, Any]) -> None:
+    replace_artifact(manifest, "path_c_consistency", entry)
+    gates = manifest.get("analysis_gates")
+    if not isinstance(gates, dict):
+        gates = {}
+        manifest["analysis_gates"] = gates
+    gates["path_c_consistency"] = {"status": "pass", "recovered": True}
+    add_artifact_capability(manifest, "path_c_consistency")
+    remove_skipped_gate(manifest, "path_c_consistency")
+
+
+def path_c_has_market_profile(manifest: dict[str, Any]) -> bool:
+    for artifact in manifest.get("artifacts", []):
+        if not isinstance(artifact, dict) or not artifact_entry_has_cap(artifact, "path_c_consistency"):
+            continue
+        path = resolve_path(artifact.get("path"))
+        if not path or not path.exists():
+            continue
+        payload = read_json(path, {})
+        if isinstance(payload, dict) and isinstance(payload.get("market_profile"), dict):
+            return True
+    return False
+
+
 def stamp_artifact(path: Path, recovery_id: str, action: str, manifest_path: Path) -> None:
     payload = read_json(path, {})
     if not isinstance(payload, dict):
@@ -666,6 +853,14 @@ def build_legacy_guarded_report_text(
     summary = crossbook.get("summary") if isinstance(crossbook.get("summary"), dict) else {}
     football_data_id = manifest.get("football_data_id") or "TBD"
     venue = manifest.get("venue") or "TBD"
+    gates = manifest.get("analysis_gates") if isinstance(manifest.get("analysis_gates"), dict) else {}
+    path_c_gate = gates.get("path_c_consistency")
+    path_c_status = str((path_c_gate or {}).get("status") if isinstance(path_c_gate, dict) else path_c_gate or "").lower()
+    path_c_gate_line = (
+        "- path_c_consistency: recovered — same-snapshot consistency_triangle artifact is available for market-profile projection."
+        if path_c_status == "pass"
+        else "- path_c_consistency: skipped_missing_source — no valid consistency triangle artifact is available for this recovered report."
+    )
 
     return "\n".join(
         [
@@ -726,7 +921,7 @@ def build_legacy_guarded_report_text(
             "## 4. Skipped Gates",
             "",
             "- devig_three_method: skipped_missing_source — legacy artifact is shin-only, not three-method devig.",
-            "- path_c_consistency: skipped_missing_source — no valid consistency triangle artifact is available for this recovered report.",
+            path_c_gate_line,
             "",
             "## 5. Final",
             "",
@@ -926,6 +1121,22 @@ def recover_legacy_guarded_report(event: dict[str, Any], recovery_id: str) -> di
             }
         )
 
+    path_c_entry, path_c_reason = try_generate_path_c_artifact(
+        manifest,
+        manifest_path,
+        match_id,
+        home,
+        away,
+        timestamp,
+        recovery_id,
+    )
+    if path_c_entry:
+        mark_path_c_available(manifest, path_c_entry)
+        manifest["recovery_provenance"][0]["actions"].append("generate_path_c_consistency")
+        manifest["recovery_provenance"][0]["path_c_artifact_path"] = path_c_entry.get("path")
+    else:
+        manifest["recovery_provenance"][0]["path_c_recovery_reason"] = path_c_reason
+
     update_direct_request_for_recovery(direct_request_path, manifest_path, report_path, match_id, match_label, event)
     write_json(manifest_path, manifest)
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -971,7 +1182,30 @@ def recover_missing_artifacts(event: dict[str, Any], recovery_id: str) -> dict[s
     actions: list[str] = []
 
     caps = manifest_artifact_caps(manifest_before)
-    if "role_engine" not in caps:
+    generated_path_c = False
+    path_c_needs_market_profile = "path_c_consistency" in caps and not path_c_has_market_profile(manifest_before)
+    if "path_c_consistency" not in caps or path_c_needs_market_profile:
+        home = str(manifest_before.get("home") or manifest_before.get("home_team") or "")
+        away = str(manifest_before.get("away") or manifest_before.get("away_team") or "")
+        if home and away:
+            path_c_entry, _path_c_reason = try_generate_path_c_artifact(
+                manifest_before,
+                manifest_path,
+                match_id,
+                home,
+                away,
+                timestamp,
+                recovery_id,
+                force=path_c_needs_market_profile,
+            )
+            if path_c_entry:
+                mark_path_c_available(manifest_before, path_c_entry)
+                write_json(manifest_path, manifest_before)
+                actions.append("generate_path_c_consistency")
+                generated_path_c = True
+                caps = manifest_artifact_caps(manifest_before)
+
+    if generated_path_c or "role_engine" not in caps:
         role_path = ARTIFACTS_DIR / f"role-engine-{match_id}-{timestamp}-recovery.json"
         role_cmd = [
             python_bin(),
@@ -1112,6 +1346,22 @@ def recover_missing_guarded_report(event: dict[str, Any]) -> dict[str, Any]:
         return {"status": "waiting", "reason": "no guarded manifest or recoverable legacy artifact bundle exists yet"}
     manifest_path, manifest = found
     report_path = manifest_report_path(manifest, manifest_path)
+    caps = manifest_artifact_caps(manifest)
+    gates = manifest.get("analysis_gates") if isinstance(manifest.get("analysis_gates"), dict) else {}
+    path_c_gate = gates.get("path_c_consistency")
+    path_c_status = str((path_c_gate or {}).get("status") if isinstance(path_c_gate, dict) else path_c_gate or "").lower()
+    needs_repair = (
+        "role_engine" not in caps
+        or "mechanism_audit" not in caps
+        or "path_c_consistency" not in caps
+        or not path_c_has_market_profile(manifest)
+        or "skipped_missing_source" in path_c_status
+    )
+    if needs_repair:
+        return recover_missing_artifacts(
+            {"manifest_path": str(manifest_path), "report_path": str(report_path) if report_path else ""},
+            recovery_id_for(event),
+        )
     ok, validation = validate_manifest(manifest_path, report_path)
     if not ok:
         return {"status": "failed_contract", "reason": validation, "manifest_path": str(manifest_path)}

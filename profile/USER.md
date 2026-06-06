@@ -12,6 +12,11 @@
 - 每场真实报告落地后, 最终 Telegram 回复应追加 Exa × Jina Deep Research
   后置分析: 用 LLM 做通俗博弈解读和下注方向提示, 但不能污染主报告数字或把
   research-only 结论改写成确定下注。
+- Deep Research 缺少部分证据时, 忽略不合格 finding, 不要拦截主报告。
+  最终回复必须带非空 `📁 Deep Research: <artifact path>`; 如果没有可用
+  deep-research artifact, 就明确写后置研究未完成。
+- 市场画像要来自 `consistency_triangle.py` 的 `market_profile`; 没有 Path C
+  artifact 时只能写"市场画像未生成", 不能让 LLM 自己推比分概率。
 
 ## 标准结论枚举
 
@@ -42,4 +47,6 @@
    - Exa 查历史盘口/市场效率/可比样本;
    - Jina 读官方、球队、媒体原文;
    - 给出研究倾向、下注等待条件、升级触发和撤回条件;
+   - 引用非空 deep-research artifact 路径;
+   - 只解释已有 market_profile, 不自由重算市场画像;
    - 明确主报告结论是否仍是 WATCH / PASS / NO PLAY。

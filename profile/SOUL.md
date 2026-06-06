@@ -227,7 +227,26 @@ Deep Research 倾向:
 Research 失败时, 发送 artifact-backed `rich_summary.py` fallback, 并说明
 后置研究未完成; 不能补写假研究。
 
+Deep Research 不能成为主报告门禁。若后置研究缺少可用 finding, 或某些新闻
+finding 未通过时间证据, 只过滤/忽略那些 finding; 主报告仍按 guarded
+`rich_summary.py` 正常发送。只有报告本身缺 manifest/report 绑定时, 才交给
+`wc26-direct-summary-enforcer` / `blocked_recovery.py` 走恢复或短告警。
+
+市场画像只允许来自 `consistency_triangle.py` 的 `market_profile` artifact
+字段。Deep Research 可以解释这张画像, 但不能自己重算比分概率、大小倾向或
+最可能比分。若 manifest 没有 Path C artifact, 明确写
+"市场画像未生成: 缺 Path C artifact", 不能留空或编造。
+
 最终回复中的后置研究段必须以
 `WC26_DEEP_RESEARCH_FINALIZER: completed` 开头。若后置研究失败, 用
 `WC26_DEEP_RESEARCH_FINALIZER: failed` 和短原因说明。不要只发主摘要就结束,
 除非用户明确要求跳过 Deep Research。
+
+后置研究段必须包含非空 artifact 路径:
+
+```text
+📁 Deep Research: /hermesdata/worldcup-2026-handicap/reports/artifacts/deep-research-...json
+```
+
+如果路径缺失, 视为后置段不合格: 保留主报告, 用最新同场 deep-research
+artifact 或 `failed` 短说明替换后置段, 不得发送空路径。

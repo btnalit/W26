@@ -624,8 +624,26 @@ side is worth watching and which triggers would upgrade or invalidate that
 direction, but it must not rewrite the manifest/report numbers, enter the
 adjustment ledger, change `p_adj`, EV, Kelly, `relay_actionable`, or
 `qualified_play_count`, or convert a `WATCH / NO PLAY` baseline into a bet.
-If Deep Research fails, send the artifact-backed `rich_summary.py` output and
-state that the post-report research layer did not complete.
+If some Deep Research findings fail the freshness/source contract, ignore those
+findings and keep the guarded main report. If the Deep Research layer as a
+whole fails, send the artifact-backed `rich_summary.py` output and state that
+the post-report research layer did not complete.
+
+The Deep Research addendum must include a non-empty artifact path:
+
+```text
+WC26_DEEP_RESEARCH_FINALIZER: completed
+📁 Deep Research: /hermesdata/worldcup-2026-handicap/reports/artifacts/deep-research-...json
+```
+
+Do not emit `📁 Deep Research:` with a blank value. If no artifact exists, use
+`WC26_DEEP_RESEARCH_FINALIZER: failed` and a short reason after the main
+summary.
+
+Market profile / most-likely-score commentary is allowed only when the guarded
+manifest includes a `path_c_consistency` artifact with `market_profile`. The
+finalizer may explain those artifact numbers, but must not recalculate them.
+If no such artifact exists, write `市场画像未生成: 缺 Path C artifact`.
 
 Direct Telegram request persistence is a separate required lifecycle. Every
 new Telegram analysis message must get a new `direct_request_id`, even when the

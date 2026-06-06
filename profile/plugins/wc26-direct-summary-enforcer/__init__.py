@@ -20,8 +20,6 @@ from typing import Any, Optional
 
 WORKSPACE = Path(os.environ.get("WC26_WORKSPACE", "/hermesdata/worldcup-2026-handicap"))
 MAX_CHARS = os.environ.get("WC26_DIRECT_SUMMARY_MAX_CHARS", "3900")
-BASE_MAX_CHARS_WITH_DEEP_RESEARCH = os.environ.get("WC26_DIRECT_SUMMARY_BASE_MAX_CHARS", "2300")
-TOTAL_MAX_CHARS = int(os.environ.get("WC26_TELEGRAM_TOTAL_MAX_CHARS", "3900"))
 REPORT_HEADER_SCAN_LINES = 80
 RECENT_DIRECT_CONTEXT_MINUTES = int(os.environ.get("WC26_RECENT_DIRECT_CONTEXT_MINUTES", "180"))
 TRAILING_PUNCTUATION = ".,;:，。；：)）]】}>"
@@ -111,6 +109,12 @@ def transform_llm_output(**kwargs) -> Optional[str]:
     expects_deep_research = looks_like_wc26_report(response_text)
     deep_research_section = extract_deep_research_section(response_text)
     had_deep_research_section = deep_research_section is not None
+    has_full_report_body = has_report_body_before_deep_research(response_text)
+    manifest_has_market_profile = _market_profile_from_manifest(manifest_path) is not None
+    body_has_required_market_profile = (
+        not manifest_has_market_profile or has_market_profile_before_deep_research(response_text)
+    )
+    pass_through_valid_deep_research = False
     if deep_research_section and deep_research_has_forbidden_boundary(deep_research_section):
         _log(
             "drop_deep_research_forbidden_boundary",
@@ -122,7 +126,14 @@ def transform_llm_output(**kwargs) -> Optional[str]:
         deep_research_section = None
     if deep_research_section:
         contract_result = run_deep_research_contract(deep_research_section, manifest_path)
-        if not contract_result["ok"]:
+        if contract_result["ok"]:
+            pass_through_valid_deep_research = (
+                had_deep_research_section
+                and deep_research_is_completed(deep_research_section)
+                and has_full_report_body
+                and body_has_required_market_profile
+            )
+        else:
             sanitized_section = contract_result.get("sanitized_section")
             if isinstance(sanitized_section, str) and sanitized_section.strip():
                 _log(
@@ -135,6 +146,7 @@ def transform_llm_output(**kwargs) -> Optional[str]:
                     error=str(contract_result.get("error") or "")[:500],
                 )
                 deep_research_section = sanitized_section
+                pass_through_valid_deep_research = False
             else:
                 _log(
                     "drop_deep_research_contract_failed",
@@ -146,6 +158,7 @@ def transform_llm_output(**kwargs) -> Optional[str]:
                     error=str(contract_result.get("error") or "")[:500],
                 )
                 deep_research_section = None
+                pass_through_valid_deep_research = False
     if expects_deep_research and not deep_research_section:
         deep_research_section = deep_research_section_from_latest_artifact(manifest_path)
         if deep_research_section:
@@ -177,9 +190,27 @@ def transform_llm_output(**kwargs) -> Optional[str]:
     result = run_direct_summary(
         manifest_path,
         report_path,
-        max_chars=BASE_MAX_CHARS_WITH_DEEP_RESEARCH if deep_research_section else MAX_CHARS,
+        max_chars=MAX_CHARS,
     )
     if result.returncode == 0 and result.stdout.strip():
+        if pass_through_valid_deep_research:
+            _log(
+                "pass_through_valid_deep_research",
+                session_id=kwargs.get("session_id"),
+                platform=platform,
+                manifest_path=str(manifest_path),
+                report_path=str(report_path) if report_path else "",
+            )
+            return response_text.strip()
+        if has_full_report_body and deep_research_section and body_has_required_market_profile:
+            _log(
+                "preserve_report_replace_deep_research",
+                session_id=kwargs.get("session_id"),
+                platform=platform,
+                manifest_path=str(manifest_path),
+                report_path=str(report_path) if report_path else "",
+            )
+            return replace_deep_research_section(response_text, deep_research_section)
         output = result.stdout.strip()
         if deep_research_section:
             output = append_deep_research_section(output, deep_research_section)
@@ -436,15 +467,43 @@ def looks_like_wc26_report(text: str) -> bool:
     return False
 
 
+def has_report_body_before_deep_research(text: str) -> bool:
+    before = (text or "").split(DEEP_RESEARCH_MARKER, 1)[0]
+    section_count = len(re.findall(r"(?m)^\s*[①②③④⑤⑥⑦⑧⑨⑩]", before))
+    if section_count >= 2:
+        return True
+    signal_patterns = (
+        r"\bWC26\s+M?\d{3}\b",
+        r"\bPath\s*A\b",
+        r"\bPinnacle\b",
+        r"\breport_contract\b",
+        r"\breport_guard\b",
+        r"\bNO PLAY\b",
+        r"\bPASS\b",
+        r"\bWATCH\b",
+        r"盘口",
+        r"跨书商",
+        r"博弈读盘",
+        r"比赛事实",
+        r"最终裁定",
+    )
+    signal_count = sum(1 for pattern in signal_patterns if re.search(pattern, before, flags=re.IGNORECASE))
+    return bool(re.search(r"All validations pass", before, flags=re.IGNORECASE) and signal_count >= 4)
+
+
+def has_market_profile_before_deep_research(text: str) -> bool:
+    before = (text or "").split(DEEP_RESEARCH_MARKER, 1)[0]
+    return bool(re.search(r"Path\s*C\s*市场画像|市场画像", before, flags=re.IGNORECASE))
+
+
 def append_deep_research_section(summary: str, section: str) -> str:
     separator = "\n\n---\n\n"
-    available = TOTAL_MAX_CHARS - len(summary) - len(separator)
-    if available <= 80:
-        return summary
-    clean_section = section.strip()
-    if len(clean_section) > available:
-        clean_section = clean_section[: max(0, available - 16)].rstrip() + "\n...(截断)"
-    return summary + separator + clean_section
+    return summary + separator + section.strip()
+
+
+def replace_deep_research_section(text: str, section: str) -> str:
+    before = (text or "").split(DEEP_RESEARCH_MARKER, 1)[0].rstrip()
+    return append_deep_research_section(before, section)
 
 
 def deep_research_section_from_latest_artifact(manifest_path: Path) -> Optional[str]:

@@ -307,6 +307,111 @@ def test_missing_artifact_recovery_stamps_provenance_and_preserves_quality(tmp_p
     assert mechanism_payload["generated_by"] == "blocked_recovery"
 
 
+def test_missing_artifact_recovery_generates_path_c_before_role_engine(tmp_path: Path, monkeypatch) -> None:
+    mod = load_module("blocked_recovery_test", SCRIPT_PATH)
+    workspace = tmp_path / "workspace"
+    mod.WORKSPACE = workspace
+    mod.ARTIFACTS_DIR = workspace / "reports" / "artifacts"
+    mod.SCRIPTS_DIR = tmp_path / "scripts"
+    mod.PROFILE_ROOT = tmp_path
+
+    snapshot = write_json(workspace / "snapshots" / "odds" / "snapshot-M123.json", {"data": []})
+    manifest_path = workspace / "reports" / "artifacts" / "manifest-M123.json"
+    report_path = workspace / "reports" / "match" / "M123.md"
+    crossbook_path = workspace / "reports" / "artifacts" / "crossbook-M123.json"
+    write_json(crossbook_path, {"artifact_type": "crossbook_scan", "summary": {"quotes_scanned": 1}})
+    write_json(
+        manifest_path,
+        {
+            "manifest_id": "manifest:m123",
+            "match_id": "M123",
+            "home": "Haiti",
+            "away": "Scotland",
+            "final_status": "watch",
+            "source_quality": "B",
+            "source_quality_cap": "C",
+            "actionable_allowed": False,
+            "report_completeness": "partial",
+            "report_path": str(report_path),
+            "snapshot_id": snapshot.name,
+            "analysis_gates": {
+                "path_c_consistency": {"status": "skipped_missing_source"},
+                "role_engine": "missing",
+                "mechanism_audit": "missing",
+            },
+            "skipped_sections": [{"gate": "path_c_consistency", "reason": "missing"}],
+            "artifacts": [
+                {
+                    "artifact_id": "crossbook:m123",
+                    "artifact_type": "crossbook_scan",
+                    "script": "cross_book_scan.py",
+                    "path": str(crossbook_path),
+                    "source_snapshot_id": snapshot.name,
+                    "provides": ["path_a_crossbook"],
+                }
+            ],
+        },
+    )
+    report_path.parent.mkdir(parents=True)
+    report_path.write_text("WC26 M123 report\n", encoding="utf-8")
+
+    def fake_cmd(args, timeout=60):
+        joined = " ".join(str(item) for item in args)
+        if "consistency_triangle.py" in joined:
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                json.dumps(
+                    {
+                        "match": "Haiti vs Scotland",
+                        "signal": {"type": None, "strength": "无"},
+                        "discrepancy": {"pp": 0.4},
+                        "market_profile": {
+                            "contract": "wc26.market_profile.v1",
+                            "status": "ok",
+                            "confidence": "high",
+                        },
+                    }
+                ),
+                "",
+            )
+        if "role_engine.py" in joined:
+            current = json.loads(manifest_path.read_text(encoding="utf-8"))
+            assert any("path_c_consistency" in item.get("provides", []) for item in current["artifacts"])
+            output = Path(args[args.index("--output") + 1])
+            write_json(output, {"artifact_type": "role_engine", "telegram_bullets_zh": []})
+            current["artifacts"].append(
+                {"artifact_id": "role:m123", "artifact_type": "role_engine", "script": "role_engine.py", "path": str(output), "provides": ["role_engine"]}
+            )
+            manifest_path.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
+            return subprocess.CompletedProcess(args, 0, "role ok", "")
+        if "mechanism_audit.py" in joined:
+            output = Path(args[args.index("--output") + 1])
+            write_json(output, {"artifact_type": "mechanism_audit", "mechanism_audit_status": "complete"})
+            return subprocess.CompletedProcess(args, 0, "mechanism ok", "")
+        if "rich_summary.py" in joined:
+            return subprocess.CompletedProcess(args, 0, "SUMMARY WITH MARKET PROFILE", "")
+        return subprocess.CompletedProcess(args, 0, "ok", "")
+
+    monkeypatch.setattr(mod, "cmd_run", fake_cmd)
+    monkeypatch.setattr(mod, "validate_manifest", lambda manifest, report: (True, "ok"))
+
+    result = mod.recover_missing_artifacts(
+        {"manifest_path": str(manifest_path), "report_path": str(report_path)},
+        "br:pathc",
+    )
+
+    assert result["status"] == "recovered"
+    assert "generate_path_c_consistency" in result["actions"]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["analysis_gates"]["path_c_consistency"]["status"] == "pass"
+    assert not any(item.get("gate") == "path_c_consistency" for item in manifest.get("skipped_sections", []))
+    path_c_entry = next(item for item in manifest["artifacts"] if "path_c_consistency" in item.get("provides", []))
+    path_c_payload = json.loads(Path(path_c_entry["path"]).read_text(encoding="utf-8"))
+    assert path_c_payload["generated_by"] == "blocked_recovery"
+    assert path_c_payload["market_profile"]["contract"] == "wc26.market_profile.v1"
+
+
 def test_missing_artifact_recovery_rolls_back_on_contract_failure(tmp_path: Path, monkeypatch) -> None:
     mod = load_module("blocked_recovery_test", SCRIPT_PATH)
     workspace = tmp_path / "workspace"
@@ -367,6 +472,110 @@ def test_missing_guarded_report_requires_exact_window(tmp_path: Path) -> None:
     write_json(mod.ARTIFACTS_DIR / "manifest-M777.json", {"match_id": "M777", "final_status": "pass"})
 
     assert mod.find_latest_manifest("M777", "T-72h_early") is None
+
+
+def test_existing_guarded_report_with_missing_path_c_is_repaired(tmp_path: Path, monkeypatch) -> None:
+    mod = load_module("blocked_recovery_test", SCRIPT_PATH)
+    workspace = tmp_path / "workspace"
+    mod.WORKSPACE = workspace
+    mod.ARTIFACTS_DIR = workspace / "reports" / "artifacts"
+
+    manifest_path = workspace / "reports" / "artifacts" / "manifest-M124.json"
+    report_path = workspace / "reports" / "match" / "M124.md"
+    write_json(
+        manifest_path,
+        {
+            "match_id": "M124",
+            "home": "Haiti",
+            "away": "Scotland",
+            "report_path": str(report_path),
+            "analysis_gates": {"path_c_consistency": {"status": "skipped_missing_source"}},
+            "artifacts": [{"artifact_id": "role:m124", "artifact_type": "role_engine", "provides": ["role_engine"]}],
+        },
+    )
+    report_path.parent.mkdir(parents=True)
+    report_path.write_text("WC26 M124 report\n", encoding="utf-8")
+    called = {}
+
+    def fake_recover(event, recovery_id):
+        called["event"] = event
+        called["recovery_id"] = recovery_id
+        return {"status": "recovered", "summary": "SUMMARY"}
+
+    monkeypatch.setattr(mod, "recover_missing_artifacts", fake_recover)
+
+    result = mod.recover_missing_guarded_report({"match_id": "M124", "reason": "missing Path C"})
+
+    assert result["status"] == "recovered"
+    assert called["event"]["manifest_path"] == str(manifest_path)
+    assert called["event"]["report_path"] == str(report_path)
+
+
+def test_existing_guarded_report_with_path_c_stub_is_repaired(tmp_path: Path, monkeypatch) -> None:
+    mod = load_module("blocked_recovery_test", SCRIPT_PATH)
+    workspace = tmp_path / "workspace"
+    mod.WORKSPACE = workspace
+    mod.ARTIFACTS_DIR = workspace / "reports" / "artifacts"
+
+    manifest_path = workspace / "reports" / "artifacts" / "manifest-M125.json"
+    report_path = workspace / "reports" / "match" / "M125.md"
+    path_c = write_json(workspace / "reports" / "artifacts" / "consistency-M125.json", {"status": "no_signal"})
+    write_json(
+        manifest_path,
+        {
+            "match_id": "M125",
+            "home": "Haiti",
+            "away": "Scotland",
+            "report_path": str(report_path),
+            "analysis_gates": {"path_c_consistency": {"status": "pass"}},
+            "artifacts": [
+                {"artifact_id": "pathc:m125", "artifact_type": "consistency_triangle", "path": str(path_c), "provides": ["path_c_consistency"]},
+                {"artifact_id": "role:m125", "artifact_type": "role_engine", "provides": ["role_engine"]},
+                {"artifact_id": "mechanism:m125", "artifact_type": "mechanism_audit", "provides": ["mechanism_audit"]},
+            ],
+        },
+    )
+    report_path.parent.mkdir(parents=True)
+    report_path.write_text("WC26 M125 report\n", encoding="utf-8")
+    called = {}
+
+    def fake_recover(event, recovery_id):
+        called["event"] = event
+        return {"status": "recovered", "summary": "SUMMARY"}
+
+    monkeypatch.setattr(mod, "recover_missing_artifacts", fake_recover)
+
+    result = mod.recover_missing_guarded_report({"match_id": "M125", "reason": "Path C stub missing market profile"})
+
+    assert result["status"] == "recovered"
+    assert called["event"]["manifest_path"] == str(manifest_path)
+
+
+def test_snapshot_candidates_include_existing_path_c_payload_snapshot_path(tmp_path: Path) -> None:
+    mod = load_module("blocked_recovery_test", SCRIPT_PATH)
+    workspace = tmp_path / "workspace"
+    mod.WORKSPACE = workspace
+    snapshot = write_json(workspace / "snapshots" / "odds" / "snapshot-M126.json", {"data": []})
+    path_c = write_json(
+        workspace / "reports" / "artifacts" / "consistency-M126.json",
+        {"artifact_type": "consistency_triangle", "snapshot_path": str(snapshot)},
+    )
+    manifest = {
+        "match_id": "M126",
+        "artifacts": [
+            {
+                "artifact_id": "pathc:m126",
+                "artifact_type": "consistency_triangle",
+                "path": str(path_c),
+                "provides": ["path_c_consistency"],
+            }
+        ],
+    }
+
+    candidates = mod.manifest_snapshot_candidates(manifest)
+
+    assert str(snapshot) in {str(item) for item in candidates}
+    assert mod.source_snapshot_path(str(snapshot)) == snapshot
 
 
 def test_terminal_event_is_archived_after_processing(tmp_path: Path) -> None:

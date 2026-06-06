@@ -1,4 +1,5 @@
 import importlib.util
+import json
 from pathlib import Path
 
 
@@ -100,3 +101,82 @@ def test_summary_market_profile_projection_is_descriptive():
     assert any("非下注信号" in line for line in direct_lines)
     assert direct_lines == rich_lines
     assert not any("value" in line.lower() or "edge" in line.lower() for line in direct_lines)
+
+
+def test_match_filter_accepts_vs_separator(tmp_path: Path):
+    ct = load_module("consistency_triangle_match_filter", "consistency_triangle.py")
+    snapshot = tmp_path / "snapshot.json"
+    snapshot.write_text(
+        json.dumps(
+            {
+                "data": [
+                    {
+                        "home_team": "Haiti",
+                        "away_team": "Scotland",
+                        "bookmakers": [
+                            {
+                                "key": "pinnacle",
+                                "markets": [
+                                    {
+                                        "key": "h2h",
+                                        "outcomes": [
+                                            {"name": "Haiti", "price": 6.79},
+                                            {"name": "Draw", "price": 4.39},
+                                            {"name": "Scotland", "price": 1.51},
+                                        ],
+                                    },
+                                    {
+                                        "key": "spreads",
+                                        "outcomes": [
+                                            {"name": "Haiti", "price": 2.02, "point": 1.0},
+                                            {"name": "Scotland", "price": 1.88, "point": -1.0},
+                                        ],
+                                    },
+                                    {
+                                        "key": "totals",
+                                        "outcomes": [
+                                            {"name": "Over", "price": 1.98, "point": 2.5},
+                                            {"name": "Under", "price": 1.91, "point": 2.5},
+                                        ],
+                                    },
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    results = ct.analyze_snapshot(str(snapshot), "Haiti vs Scotland")
+
+    assert len(results) == 1
+    assert results[0]["match"] == "Haiti vs Scotland"
+    assert "market_profile" in results[0]
+
+
+def test_wide_spread_suppresses_path_c_signal_but_keeps_market_profile():
+    ct = load_module("consistency_triangle_wide_spread", "consistency_triangle.py")
+    data = {
+        "match": "Haiti vs Scotland",
+        "bookmaker": "pinnacle",
+        "h2h": {"Haiti": 6.79, "Draw": 4.39, "Scotland": 1.51},
+        "spreads": {
+            "Haiti": {"price": 2.02, "point": 1.0},
+            "Scotland": {"price": 1.88, "point": -1.0},
+        },
+        "totals": {
+            "Over": {"price": 1.98, "point": 2.5},
+            "Under": {"price": 1.91, "point": 2.5},
+        },
+    }
+
+    result = ct.analyze_consistency(data)
+
+    assert result["analysis"]["spread_warning"]
+    assert result["signal"]["suppressed"] is True
+    assert result["signal"]["type"] is None
+    assert result["discrepancy"]["pp"] is None
+    assert result["discrepancy"]["raw_pp"] is not None
+    assert result["market_profile"]["status"] == "ok"

@@ -24,7 +24,9 @@ import argparse
 import functools
 import json
 import math
+import re
 import sys
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -629,6 +631,31 @@ def extract_pinnacle_markets(
     return {"error": f"Match {home_team} vs {away_team} not found"}
 
 
+def normalize_match_text(value: str) -> str:
+    """Normalize match labels for deterministic CLI filtering.
+
+    the-odds-api events store home/away separately, while callers often pass
+    "Home vs Away". Treat the separator as punctuation so recovery jobs do not
+    silently miss a recoverable match.
+    """
+    text = unicodedata.normalize("NFKD", str(value or "").lower())
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = re.sub(r"\b(vs|v|versus)\b", " ", text)
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return " ".join(text.split())
+
+
+def match_filter_matches(home: str, away: str, match_filter: str | None) -> bool:
+    if not match_filter:
+        return True
+    needle = normalize_match_text(match_filter)
+    if not needle:
+        return True
+    forward = normalize_match_text(f"{home} {away}")
+    reverse = normalize_match_text(f"{away} {home}")
+    return needle in forward or needle in reverse
+
+
 def analyze_consistency(pinnacle_data: dict[str, Any]) -> dict[str, Any]:
     """Main consistency triangle analysis."""
     if "error" in pinnacle_data:
@@ -744,6 +771,38 @@ def analyze_consistency(pinnacle_data: dict[str, Any]) -> dict[str, Any]:
             f"会系统性偏高（需高 λ 才能产生匹配让球线的比分差）。"
             f"此偏差部分来自模型假设误差，不一定代表市场定价不一致。"
         )
+    discrepancy = {
+        "pp": disc_pp,
+        "direction": direction,
+        "interpretation": (
+            f"AH+1X2 反推 P(O{float(tot_line):g})={implied_p_over:.0%}, "
+            f"Totals 市场 P(O{float(tot_line):g})={tot_probs[0]:.0%}, "
+            f"差 {abs(disc_pp):.0f}pp"
+        ),
+    }
+    path_c_signal = signal
+    if spread_warning:
+        path_c_signal = {
+            "type": None,
+            "strength": "diagnostic_suppressed",
+            "action": "宽让球线下 Poisson 反推偏差被抑制；保留 market_profile 作描述性画像，不作为 Path C 信号。",
+            "suppressed": True,
+            "suppress_reason": "wide_spread_poisson_unreliable",
+            "raw_type": signal.get("type"),
+            "raw_strength": signal.get("strength"),
+            "raw_action": signal.get("action"),
+            "raw_discrepancy_pp": disc_pp,
+        }
+        discrepancy = {
+            "pp": None,
+            "direction": direction,
+            "suppressed": True,
+            "suppress_reason": "wide_spread_poisson_unreliable",
+            "raw_pp": disc_pp,
+            "interpretation": (
+                f"AH+1X2 反推与 Totals 的原始偏差 {abs(disc_pp):.0f}pp 已因宽让球线模型失真抑制。"
+            ),
+        }
 
     result = {
         "match": pinnacle_data["match"],
@@ -778,16 +837,8 @@ def analyze_consistency(pinnacle_data: dict[str, Any]) -> dict[str, Any]:
             f"p_over_{tot_line}": round(implied_p_over, 4),
             f"p_under_{tot_line}": round(1 - implied_p_over, 4),
         },
-        "discrepancy": {
-            "pp": disc_pp,
-            "direction": direction,
-            "interpretation": (
-                f"AH+1X2 反推 P(O{float(tot_line):g})={implied_p_over:.0%}, "
-                f"Totals 市场 P(O{float(tot_line):g})={tot_probs[0]:.0%}, "
-                f"差 {abs(disc_pp):.0f}pp"
-            ),
-        },
-        "signal": signal,
+        "discrepancy": discrepancy,
+        "signal": path_c_signal,
         "market_profile": market_profile,
         "caveat": "Poisson 模型是结构近似，不是事实。<5pp 偏差在方法误差范围内。需跨书商验证才能 actionable。",
     }
@@ -805,7 +856,7 @@ def analyze_snapshot(
     for ev in events:
         home = ev.get("home_team", "")
         away = ev.get("away_team", "")
-        if match_filter and match_filter.lower() not in f"{home} {away}".lower():
+        if not match_filter_matches(home, away, match_filter):
             continue
         
         pinnacle_data = extract_pinnacle_markets(raw, home, away)

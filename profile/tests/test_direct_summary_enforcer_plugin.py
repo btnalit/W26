@@ -469,8 +469,6 @@ def test_incoming_unbound_deep_research_falls_back_to_cached_artifact(tmp_path, 
 
 def test_cached_deep_research_keeps_artifact_path_when_section_is_long(tmp_path, monkeypatch):
     plugin, _home, workspace = load_plugin(monkeypatch, tmp_path)
-    monkeypatch.setattr(plugin, "TOTAL_MAX_CHARS", 900)
-    monkeypatch.setattr(plugin, "BASE_MAX_CHARS_WITH_DEEP_RESEARCH", "420")
     manifest = workspace / "reports" / "artifacts" / "manifest-M015.json"
     artifact = workspace / "reports" / "artifacts" / "deep-research-M015-20260606T120000Z.json"
     manifest.parent.mkdir(parents=True)
@@ -500,6 +498,231 @@ def test_cached_deep_research_keeps_artifact_path_when_section_is_long(tmp_path,
     assert result is not None
     assert f"📁 Deep Research: {artifact}" in result
     assert result.index(f"📁 Deep Research: {artifact}") < result.index("研究倾向")
+    assert "截断" not in result
+    assert "长文本。" * 50 in result
+
+
+def test_incoming_bound_deep_research_is_not_truncated(tmp_path, monkeypatch):
+    plugin, _home, workspace = load_plugin(monkeypatch, tmp_path)
+    manifest = workspace / "reports" / "artifacts" / "manifest-M016.json"
+    artifact = workspace / "reports" / "artifacts" / "deep-research-M016-20260606T120000Z.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps({"match_id": "M016"}), encoding="utf-8")
+    artifact.write_text(json.dumps({"match_id": "M016", "artifact_type": "deep_research"}), encoding="utf-8")
+    tail = "TAIL-完整保留"
+    long_research = "\n".join(
+        [
+            "WC26_DEEP_RESEARCH_FINALIZER: completed",
+            "",
+            "🔬 Deep Research 深度解读",
+            f"📁 Deep Research: {artifact}",
+            "研究倾向: 观察受让方",
+            "长段落。" * 900,
+            tail,
+        ]
+    )
+
+    result = plugin.transform_llm_output(
+        platform="telegram",
+        session_id="s-long-incoming-deep",
+        response_text=f"WC26 M016 Team A vs Team B — WATCH\nPath A 跨书商扫描\nManifest: {manifest}\n\n{long_research}",
+    )
+
+    assert result is not None
+    assert "WC26_DEEP_RESEARCH_FINALIZER: completed" in result
+    assert f"📁 Deep Research: {artifact}" in result
+    assert tail in result
+    assert "截断" not in result
+
+
+def test_valid_bound_deep_research_final_reply_passes_through(tmp_path, monkeypatch):
+    plugin, _home, workspace = load_plugin(monkeypatch, tmp_path)
+    manifest = workspace / "reports" / "artifacts" / "manifest-M017.json"
+    artifact = workspace / "reports" / "artifacts" / "deep-research-M017-20260606T120000Z.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps({"match_id": "M017"}), encoding="utf-8")
+    artifact.write_text(json.dumps({"match_id": "M017", "artifact_type": "deep_research"}), encoding="utf-8")
+    response_text = "\n".join(
+        [
+            "All validations pass. Here's the final analysis:",
+            "",
+            "🇳🇱 WC26 M017 Team A vs Team B — 盘口分析",
+            "① 比赛事实",
+            "- 开球: 2026-06-14T20:00:00Z",
+            "② Path A 跨书商扫描",
+            "- 95条报价 | relay_actionable=0",
+            f"Manifest: {manifest}",
+            "",
+            "WC26_DEEP_RESEARCH_FINALIZER: completed",
+            "",
+            "🔬 Deep Research 深度解读",
+            f"📁 Deep Research: {artifact}",
+            "研究倾向：保留 Hermes agent 生成的人话完整分析。",
+        ]
+    )
+
+    result = plugin.transform_llm_output(
+        platform="telegram",
+        session_id="s-human-final-pass-through",
+        response_text=response_text,
+    )
+
+    assert result == response_text
+    assert "CANONICAL SUMMARY" not in result
+
+
+def test_valid_deep_research_uses_canonical_summary_when_market_profile_missing(tmp_path, monkeypatch):
+    plugin, _home, workspace = load_plugin(monkeypatch, tmp_path)
+    manifest = workspace / "reports" / "artifacts" / "manifest-M017P.json"
+    path_c = workspace / "reports" / "artifacts" / "consistency-M017P.json"
+    artifact = workspace / "reports" / "artifacts" / "deep-research-M017P-20260606T120000Z.json"
+    manifest.parent.mkdir(parents=True)
+    path_c.write_text(
+        json.dumps({"artifact_type": "consistency_triangle", "market_profile": {"status": "ok", "confidence": "high"}}),
+        encoding="utf-8",
+    )
+    manifest.write_text(
+        json.dumps(
+            {
+                "match_id": "M017P",
+                "artifacts": [
+                    {
+                        "artifact_type": "consistency_triangle",
+                        "path": str(path_c),
+                        "provides": ["path_c_consistency"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    artifact.write_text(json.dumps({"match_id": "M017P", "artifact_type": "deep_research"}), encoding="utf-8")
+    response_text = "\n".join(
+        [
+            "🇳🇱 WC26 M017P Team A vs Team B — 盘口分析",
+            "① 比赛事实",
+            "- 开球: 2026-06-14T20:00:00Z",
+            "② Path A 跨书商扫描",
+            "- 95条报价 | relay_actionable=0",
+            f"Manifest: {manifest}",
+            "",
+            "WC26_DEEP_RESEARCH_FINALIZER: completed",
+            f"📁 Deep Research: {artifact}",
+            "研究倾向：这段本身合规，但主报告缺市场画像。",
+        ]
+    )
+
+    result = plugin.transform_llm_output(
+        platform="telegram",
+        session_id="s-human-final-missing-market-profile",
+        response_text=response_text,
+    )
+
+    assert result is not None
+    assert result.startswith("CANONICAL SUMMARY")
+    assert "研究倾向：这段本身合规" in result
+
+
+def test_full_report_with_unbound_deep_research_preserves_report_and_uses_cached_artifact(tmp_path, monkeypatch):
+    plugin, _home, workspace = load_plugin(monkeypatch, tmp_path)
+    manifest = workspace / "reports" / "artifacts" / "manifest-M018.json"
+    artifact = workspace / "reports" / "artifacts" / "deep-research-M018-20260606T120000Z.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps({"match_id": "M018"}), encoding="utf-8")
+    artifact.write_text(
+        json.dumps(
+            {
+                "match_id": "M018",
+                "artifact_type": "deep_research",
+                "artifact_version": "1.2",
+                "final_view": {
+                    "direction_label_zh": "研究倾向：使用缓存的合规后置研究。",
+                    "action": "NO BET / WATCH",
+                    "why": "原始 Deep Research 缺 artifact path 时只替换后置段。",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    response_text = "\n".join(
+        [
+            "🇳🇱 WC26 M018 Team A vs Team B — 盘口分析",
+            "① 比赛事实",
+            "- 开球: 2026-06-14T20:00:00Z",
+            "② Path A 跨书商扫描",
+            "- 95条报价 | relay_actionable=0",
+            f"Manifest: {manifest}",
+            "",
+            "WC26_DEEP_RESEARCH_FINALIZER: completed",
+            "这段没有 artifact path，不能直接放行。",
+        ]
+    )
+
+    result = plugin.transform_llm_output(
+        platform="telegram",
+        session_id="s-full-report-unbound-deep",
+        response_text=response_text,
+    )
+
+    assert result is not None
+    assert result.startswith("🇳🇱 WC26 M018 Team A vs Team B")
+    assert "CANONICAL SUMMARY" not in result
+    assert "这段没有 artifact path" not in result
+    assert f"📁 Deep Research: {artifact}" in result
+    assert "研究倾向：使用缓存的合规后置研究。" in result
+
+
+def test_full_report_with_sanitized_deep_research_preserves_report_body(tmp_path, monkeypatch):
+    plugin, _home, workspace = load_plugin(monkeypatch, tmp_path)
+    manifest = workspace / "reports" / "artifacts" / "manifest-M019.json"
+    artifact = workspace / "reports" / "artifacts" / "deep-research-M019-20260606T120000Z.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps({"match_id": "M019"}), encoding="utf-8")
+    artifact.write_text(json.dumps({"match_id": "M019", "artifact_type": "deep_research"}), encoding="utf-8")
+    sanitized = "\n".join(
+        [
+            "WC26_DEEP_RESEARCH_FINALIZER: completed",
+            "⚠️ Deep Research 过滤: 已忽略未通过时间证据的 finding。",
+            f"📁 Deep Research: {artifact}",
+            "保留合规研究结论。",
+        ]
+    )
+    monkeypatch.setattr(
+        plugin,
+        "run_deep_research_contract",
+        lambda section, manifest_path: {
+            "ok": False,
+            "artifact_path": str(artifact),
+            "error": "news source missing published_at_utc",
+            "sanitized_section": sanitized,
+        },
+    )
+    response_text = "\n".join(
+        [
+            "🇳🇱 WC26 M019 Team A vs Team B — 盘口分析",
+            "① 比赛事实",
+            "- 开球: 2026-06-14T20:00:00Z",
+            "② Path A 跨书商扫描",
+            "- 95条报价 | relay_actionable=0",
+            f"Manifest: {manifest}",
+            "",
+            "WC26_DEEP_RESEARCH_FINALIZER: completed",
+            f"📁 Deep Research: {artifact}",
+            "[DR-BAD] 市场可能尚未消化。",
+        ]
+    )
+
+    result = plugin.transform_llm_output(
+        platform="telegram",
+        session_id="s-full-report-sanitized-deep",
+        response_text=response_text,
+    )
+
+    assert result is not None
+    assert result.startswith("🇳🇱 WC26 M019 Team A vs Team B")
+    assert "CANONICAL SUMMARY" not in result
+    assert "[DR-BAD]" not in result
+    assert "保留合规研究结论。" in result
 
 
 def test_report_like_reply_marks_deep_research_failed_when_no_artifact_exists(tmp_path, monkeypatch):
