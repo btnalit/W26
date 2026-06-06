@@ -27,13 +27,32 @@ def write_json(path: Path, payload: dict) -> Path:
     return path
 
 
+def write_fixture_cache(workspace: Path, *, home: str = "Example Home", away: str = "Sample Away") -> Path:
+    return write_json(
+        workspace / "snapshots" / "fixtures" / "football-data-wc-matches-latest.json",
+        {
+            "matches": [
+                {
+                    "id": 900001,
+                    "utcDate": "2026-06-14T00:00:00Z",
+                    "stage": "GROUP_STAGE",
+                    "group": "GROUP_X",
+                    "matchday": 1,
+                    "homeTeam": {"name": home, "tla": "EXH"},
+                    "awayTeam": {"name": away, "tla": "SAA"},
+                }
+            ]
+        },
+    )
+
+
 def test_classifier_routes_freeform_report_as_safety_block(tmp_path: Path) -> None:
     mod = load_module("blocked_recovery_test", SCRIPT_PATH)
 
     event = {
         "category": "safety_block",
         "reason": "wc26 report-like Telegram output missing guarded manifest/report binding",
-        "response_excerpt": "WC26 M007 Haiti vs Scotland AH -1.0 EV +23.5%",
+        "response_excerpt": "WC26 M111 Example vs Sample AH -1.0 EV +23.5%",
     }
 
     classification = mod.classify_event(event)
@@ -76,6 +95,112 @@ def test_safety_block_with_recoverable_legacy_routes_to_guarded_report(tmp_path:
     assert result["category"] == "missing_guarded_report"
 
 
+def test_direct_request_label_resolves_match_id_from_fixture_cache(tmp_path: Path) -> None:
+    mod = load_module("blocked_recovery_test", SCRIPT_PATH)
+    workspace = tmp_path / "workspace"
+    mod.WORKSPACE = workspace
+    mod.SCRIPTS_DIR = SCRIPT_PATH.parent
+    write_fixture_cache(workspace)
+    direct_path = write_json(
+        workspace / "direct_requests" / "2026-06-07" / "direct-abc.json",
+        {
+            "direct_request_id": "direct:abc",
+            "match_id": "Example Home-vs-Sample Away",
+            "match_label": "Example Home vs Sample Away",
+            "request_text": "分析 Example Home vs Sample Away",
+        },
+    )
+    event = {
+        "category": "safety_block",
+        "reason": "wc26 report-like Telegram output missing guarded manifest/report binding",
+        "direct_request_ids": ["direct:abc"],
+    }
+
+    assert mod.extract_match_id(event) == "M001"
+    assert mod.latest_direct_request_for_match("M001", event) == direct_path
+
+
+def test_w_ordinal_normalizes_for_legacy_recovery(tmp_path: Path, monkeypatch) -> None:
+    mod = load_module("blocked_recovery_test", SCRIPT_PATH)
+    workspace = tmp_path / "workspace"
+    mod.WORKSPACE = workspace
+    mod.STATE_PATH = workspace / "state" / "blocked-recovery.json"
+
+    event_path = write_json(
+        workspace / "blocked_recovery" / "queue" / "br-w-legacy.json",
+        {
+            "recovery_id": "br:w-legacy",
+            "category": "safety_block",
+            "reason": "wc26 report-like Telegram output missing guarded manifest/report binding",
+            "response_excerpt": "WC26 W123 Example vs Sample Path A report",
+        },
+    )
+
+    monkeypatch.setattr(mod, "legacy_recovery_inputs", lambda match_id, event: {"ok": True} if match_id == "M123" else None)
+    monkeypatch.setattr(
+        mod,
+        "recover_missing_guarded_report",
+        lambda event: {
+            "status": "recovered",
+            "summary": "SUMMARY",
+            "manifest_path": "/tmp/manifest-M123.json",
+            "report_path": "/tmp/M123.md",
+        },
+    )
+
+    result = mod.process_event(event_path, mod.load_state())
+
+    assert result["status"] == "recovered"
+    assert result["category"] == "missing_guarded_report"
+
+
+def test_legacy_recovery_requires_real_crossbook_markets(tmp_path: Path) -> None:
+    mod = load_module("blocked_recovery_test", SCRIPT_PATH)
+
+    assert mod.recoverable_crossbook_payload(
+        {
+            "artifact_type": "crossbook_scan",
+            "source_snapshot_id": "snap",
+            "summary": {"quotes_scanned": 1},
+        }
+    ) is False
+    assert mod.recoverable_crossbook_payload(
+        {
+            "artifact_type": "crossbook_scan",
+            "source_snapshot_id": "snap",
+            "markets": {"h2h": {"status": "ok"}},
+        }
+    ) is True
+
+
+def test_recovery_fills_missing_direct_request_contract_fields(tmp_path: Path) -> None:
+    mod = load_module("blocked_recovery_test", SCRIPT_PATH)
+    direct_path = write_json(
+        tmp_path / "direct_requests" / "2026-06-07" / "direct-abc.json",
+        {
+            "direct_request_id": "direct:abc",
+            "request_text": "分析 Example Home vs Sample Away",
+        },
+    )
+    manifest_path = tmp_path / "reports" / "artifacts" / "manifest-M001.json"
+    report_path = tmp_path / "reports" / "match" / "M001.md"
+
+    record = mod.update_direct_request_for_recovery(
+        direct_path,
+        manifest_path,
+        report_path,
+        "M001",
+        "Example Home vs Sample Away",
+        {"platform": "telegram", "chat_id": "12345", "created_at_utc": "2026-06-07T00:00:00+00:00"},
+    )
+
+    assert record["platform"] == "telegram"
+    assert record["chat_id"] == "12345"
+    assert record["created_at_utc"] == "2026-06-07T00:00:00+00:00"
+    assert record["cache_mode"] == "legacy_guarded_recovery"
+    assert record["recovery_trace"][0]["fields"] == ["platform", "chat_id", "created_at_utc"]
+
+
 def test_classifier_detects_key_mismatch_as_detector_bug_not_source_gap(tmp_path: Path) -> None:
     mod = load_module("blocked_recovery_test", SCRIPT_PATH)
 
@@ -99,7 +224,7 @@ def test_missing_guarded_report_is_not_contract_mismatch(tmp_path: Path) -> None
         {
             "category": "missing_guarded_report",
             "reason": "no guarded report/manifest for this exact window yet",
-            "match_id": "M009",
+            "match_id": "M888",
         }
     )
 

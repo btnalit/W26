@@ -20,6 +20,7 @@ import os
 import re
 import subprocess
 import sys
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -262,14 +263,14 @@ def extract_match_id(event: dict[str, Any]) -> str:
         record_path = direct_request_path_for_id(str(direct_id))
         record = read_json(record_path, {}) if record_path else {}
         if isinstance(record, dict):
-            normalized = normalize_match_id(record.get("match_id"))
+            normalized = match_id_from_direct_request_payload(record)
             if re.fullmatch(r"M\d{3}", normalized):
                 return normalized
     text = event_text(event)
     match = re.search(r"\b([MW]\d{3})\b", text, flags=re.IGNORECASE)
     if match:
         return normalize_match_id(match.group(1))
-    return ""
+    return match_id_from_fixture_text(text)
 
 
 def direct_request_path_for_id(direct_id: str) -> Path | None:
@@ -283,28 +284,41 @@ def direct_request_path_for_id(direct_id: str) -> Path | None:
     return matches[0] if matches else None
 
 
-def latest_direct_request_for_match(match_id: str, event: dict[str, Any]) -> Path | None:
-    for direct_id in event.get("direct_request_ids") or []:
-        path = direct_request_path_for_id(str(direct_id))
-        payload = read_json(path, {}) if path else {}
-        if isinstance(payload, dict) and normalize_match_id(payload.get("match_id")) == match_id:
-            return path
-    root = WORKSPACE / "direct_requests"
-    if not root.exists():
-        return None
-    candidates: list[tuple[float, Path]] = []
-    for path in root.rglob("direct-*.json"):
-        payload = read_json(path, {})
-        if not isinstance(payload, dict):
-            continue
-        if normalize_match_id(payload.get("match_id")) == match_id:
-            candidates.append((path.stat().st_mtime, path))
-    if not candidates:
-        return None
-    return max(candidates, key=lambda item: item[0])[1]
+def _normalized_text(value: Any) -> str:
+    text = unicodedata.normalize("NFKD", str(value or ""))
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = re.sub(r"[^a-zA-Z0-9]+", " ", text).lower()
+    return " ".join(text.split())
 
 
-def load_fixture_entry(match_id: str) -> dict[str, Any]:
+def _contains_name(text: str, value: Any) -> bool:
+    name = _normalized_text(value)
+    if not name:
+        return False
+    return bool(re.search(rf"(?:^|\s){re.escape(name)}(?:\s|$)", text))
+
+
+def _direct_request_search_text(payload: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for key in (
+        "match_id",
+        "local_match_id",
+        "match_label",
+        "request_text",
+        "original_text",
+        "query",
+        "text",
+        "user_text",
+        "manifest_path",
+        "report_path",
+    ):
+        value = payload.get(key)
+        if value:
+            parts.append(str(value))
+    return " ".join(parts)
+
+
+def load_fixture_registry() -> dict[str, Any]:
     fixture_path = WORKSPACE / "snapshots" / "fixtures" / "football-data-wc-matches-latest.json"
     registry_path = SCRIPTS_DIR / "fixture_registry.py"
     if not fixture_path.exists() or not registry_path.exists():
@@ -315,6 +329,94 @@ def load_fixture_entry(match_id: str) -> dict[str, Any]:
         assert spec.loader is not None
         spec.loader.exec_module(module)
         registry = module.load_registry(fixture_path)
+        return registry if isinstance(registry, dict) else {}
+    except Exception:
+        return {}
+
+
+def _fixture_entry_matches_text(entry: dict[str, Any], raw_text: str) -> bool:
+    text = _normalized_text(raw_text)
+    if not text:
+        return False
+    home_values = [entry.get("home"), entry.get("home_tla")]
+    away_values = [entry.get("away"), entry.get("away_tla")]
+    return any(_contains_name(text, value) for value in home_values) and any(
+        _contains_name(text, value) for value in away_values
+    )
+
+
+def match_id_from_fixture_text(raw_text: str) -> str:
+    registry = load_fixture_registry()
+    entries = registry.get("entries") if isinstance(registry, dict) else []
+    if not isinstance(entries, list):
+        return ""
+    candidates = [entry for entry in entries if isinstance(entry, dict) and _fixture_entry_matches_text(entry, raw_text)]
+    if len(candidates) != 1:
+        return ""
+    return normalize_match_id(candidates[0].get("local_ordinal_id"))
+
+
+def match_id_from_direct_request_payload(payload: dict[str, Any]) -> str:
+    normalized = normalize_match_id(payload.get("match_id"))
+    if re.fullmatch(r"M\d{3}", normalized):
+        return normalized
+    registry = load_fixture_registry()
+    if isinstance(registry, dict):
+        by_fd = registry.get("by_football_data_id") if isinstance(registry.get("by_football_data_id"), dict) else {}
+        for key in ("football_data_id", "fd_id"):
+            value = payload.get(key)
+            if value not in (None, ""):
+                entry = by_fd.get(str(value))
+                if isinstance(entry, dict):
+                    return normalize_match_id(entry.get("local_ordinal_id"))
+        canonical_id = str(payload.get("canonical_id") or "").strip()
+        if canonical_id.startswith("fd:"):
+            entry = by_fd.get(canonical_id.split(":", 1)[1])
+            if isinstance(entry, dict):
+                return normalize_match_id(entry.get("local_ordinal_id"))
+    return match_id_from_fixture_text(_direct_request_search_text(payload))
+
+
+def direct_request_matches_match(payload: dict[str, Any], match_id: str) -> bool:
+    if match_id_from_direct_request_payload(payload) == match_id:
+        return True
+    fixture = load_fixture_entry(match_id)
+    if not fixture:
+        return False
+    return _fixture_entry_matches_text(fixture, _direct_request_search_text(payload))
+
+
+def latest_direct_request_for_match(match_id: str, event: dict[str, Any]) -> Path | None:
+    for direct_id in event.get("direct_request_ids") or []:
+        path = direct_request_path_for_id(str(direct_id))
+        payload = read_json(path, {}) if path else {}
+        if isinstance(payload, dict) and direct_request_matches_match(payload, match_id):
+            return path
+    root = WORKSPACE / "direct_requests"
+    if not root.exists():
+        return None
+    candidates: list[tuple[float, Path]] = []
+    for path in root.rglob("direct-*.json"):
+        payload = read_json(path, {})
+        if not isinstance(payload, dict):
+            continue
+        if direct_request_matches_match(payload, match_id):
+            candidates.append((path.stat().st_mtime, path))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[0])[1]
+
+
+def load_fixture_entry(match_id: str) -> dict[str, Any]:
+    registry = load_fixture_registry()
+    if not registry:
+        return {}
+    try:
+        registry_path = SCRIPTS_DIR / "fixture_registry.py"
+        spec = importlib.util.spec_from_file_location("_wc26_fixture_registry_recovery", str(registry_path))
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
         entry = module.resolve_fixture(registry, match_id=match_id)
         return entry if isinstance(entry, dict) else {}
     except Exception:
@@ -391,6 +493,8 @@ def legacy_recovery_inputs(match_id: str, event: dict[str, Any]) -> dict[str, An
     direct_request_path = latest_direct_request_for_match(match_id, event)
     if not legacy or not crossbook or not direct_request_path:
         return None
+    if not recoverable_crossbook_payload(crossbook[1]):
+        return None
     model = find_artifact_by_prefix(match_id, "model")
     deep = find_artifact_by_prefix(match_id, "deep-research")
     return {
@@ -406,6 +510,17 @@ def legacy_recovery_inputs(match_id: str, event: dict[str, Any]) -> dict[str, An
         "direct_request": read_json(direct_request_path, {}),
         "legacy_report_path": find_legacy_report(match_id),
     }
+
+
+def recoverable_crossbook_payload(payload: dict[str, Any]) -> bool:
+    if str(payload.get("artifact_type") or "").strip() not in {"crossbook_scan", "cross_book_scan"}:
+        return False
+    if not str(payload.get("input_snapshot") or payload.get("source_snapshot_id") or "").strip():
+        return False
+    markets = payload.get("markets")
+    if not isinstance(markets, dict) or not markets:
+        return False
+    return any(isinstance(market, dict) and str(market.get("status") or "").strip() for market in markets.values())
 
 
 def load_state() -> dict[str, Any]:
@@ -627,10 +742,22 @@ def update_direct_request_for_recovery(
     report_path: Path,
     match_id: str,
     match_label: str,
+    event: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     record = read_json(direct_request_path, {})
     if not isinstance(record, dict):
         raise ValueError(f"direct request record unreadable: {direct_request_path}")
+    event = event or {}
+    filled_unknown: list[str] = []
+    if not str(record.get("platform") or "").strip():
+        record["platform"] = str(event.get("platform") or event.get("source_platform") or "unknown")
+        filled_unknown.append("platform")
+    if not str(record.get("chat_id") or "").strip():
+        record["chat_id"] = str(event.get("chat_id") or event.get("telegram_chat_id") or "unknown")
+        filled_unknown.append("chat_id")
+    if not str(record.get("created_at_utc") or "").strip():
+        record["created_at_utc"] = str(event.get("created_at_utc") or event.get("event_created_at_utc") or utc_now())
+        filled_unknown.append("created_at_utc")
     record["match_id"] = match_id
     if match_label:
         record["match_label"] = match_label
@@ -641,6 +768,20 @@ def update_direct_request_for_recovery(
     record["api_refresh_performed"] = False
     record["completed_at_utc"] = record.get("completed_at_utc") or utc_now()
     record["updated_at_utc"] = utc_now()
+    if filled_unknown:
+        recovery_trace = record.get("recovery_trace")
+        if not isinstance(recovery_trace, list):
+            recovery_trace = []
+        recovery_trace.append(
+            {
+                "generated_by": "blocked_recovery",
+                "action": "fill_missing_direct_request_contract_fields",
+                "fields": filled_unknown,
+                "note": "unknown means legacy record did not preserve exact Telegram metadata",
+                "created_at_utc": utc_now(),
+            }
+        )
+        record["recovery_trace"] = recovery_trace
     write_json(direct_request_path, record)
     return record
 
@@ -785,7 +926,7 @@ def recover_legacy_guarded_report(event: dict[str, Any], recovery_id: str) -> di
             }
         )
 
-    update_direct_request_for_recovery(direct_request_path, manifest_path, report_path, match_id, match_label)
+    update_direct_request_for_recovery(direct_request_path, manifest_path, report_path, match_id, match_label, event)
     write_json(manifest_path, manifest)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(build_legacy_guarded_report_text(manifest, manifest_path, direct_request_path, legacy, crossbook), encoding="utf-8")
