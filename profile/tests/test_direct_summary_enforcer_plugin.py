@@ -467,6 +467,41 @@ def test_incoming_unbound_deep_research_falls_back_to_cached_artifact(tmp_path, 
     assert "这段没有 Deep Research artifact 路径" not in result
 
 
+def test_cached_deep_research_keeps_artifact_path_when_section_is_long(tmp_path, monkeypatch):
+    plugin, _home, workspace = load_plugin(monkeypatch, tmp_path)
+    monkeypatch.setattr(plugin, "TOTAL_MAX_CHARS", 900)
+    monkeypatch.setattr(plugin, "BASE_MAX_CHARS_WITH_DEEP_RESEARCH", "420")
+    manifest = workspace / "reports" / "artifacts" / "manifest-M015.json"
+    artifact = workspace / "reports" / "artifacts" / "deep-research-M015-20260606T120000Z.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps({"match_id": "M015"}), encoding="utf-8")
+    artifact.write_text(
+        json.dumps(
+            {
+                "artifact_type": "deep_research",
+                "artifact_version": "1.2",
+                "match_id": "M015",
+                "final_view": {
+                    "direction_label_zh": "研究倾向: 观察受让方",
+                    "action": "NO BET / WATCH",
+                    "why": "长文本。" * 300,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = plugin.transform_llm_output(
+        platform="telegram",
+        session_id="s-long-cached-deep",
+        response_text=f"WC26 M015 Team A vs Team B — WATCH\nPath A 跨书商扫描\nManifest: {manifest}",
+    )
+
+    assert result is not None
+    assert f"📁 Deep Research: {artifact}" in result
+    assert result.index(f"📁 Deep Research: {artifact}") < result.index("研究倾向")
+
+
 def test_report_like_reply_marks_deep_research_failed_when_no_artifact_exists(tmp_path, monkeypatch):
     plugin, _home, workspace = load_plugin(monkeypatch, tmp_path)
     manifest = workspace / "reports" / "artifacts" / "manifest-M012.json"

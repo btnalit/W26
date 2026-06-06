@@ -473,6 +473,7 @@ def deep_research_section_from_latest_artifact(manifest_path: Path) -> Optional[
         "WC26_DEEP_RESEARCH_FINALIZER: completed",
         "",
         "🔬 Deep Research 深度解读",
+        f"📁 Deep Research: {artifact}",
     ]
     if direction:
         lines.extend(["", direction])
@@ -491,7 +492,6 @@ def deep_research_section_from_latest_artifact(manifest_path: Path) -> Optional[
     if falsifiers:
         lines.extend(["", "撤回条件:"])
         lines.extend(f"- {item}" for item in falsifiers[:4])
-    lines.extend(["", f"📁 Deep Research: {artifact}"])
     return "\n".join(lines).strip()
 
 
