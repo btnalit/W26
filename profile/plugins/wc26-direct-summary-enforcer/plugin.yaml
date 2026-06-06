@@ -1,0 +1,6 @@
+name: wc26-direct-summary-enforcer
+version: "0.1.0"
+description: "WC26 profile hook that replaces Telegram final replies with deterministic direct_summary.py output when a guarded report/manifest is present."
+author: WC26
+hooks:
+  - transform_llm_output

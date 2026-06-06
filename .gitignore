@@ -1,0 +1,45 @@
+# Runtime / secrets
+.env
+.env.*
+auth.json
+auth.lock
+config.yaml
+channel_directory.json
+gateway*.json
+gateway.*
+state.db*
+*.log
+*.pid
+*.lock
+
+# Hermes runtime state
+backups/
+cache/
+cron/output/
+logs/
+sessions/
+pairing/
+audio_cache/
+image_cache/
+sandboxes/
+profile/workspace/
+
+# WC26 generated data
+/hermesdata/
+reports/
+snapshots/
+direct_requests/
+blocked_recovery/
+opportunities/
+state/
+.venv/
+
+# Python
+__pycache__/
+.pytest_cache/
+*.pyc
+*.pyo
+
+# Local temp
+*_tmp*
+*.bak
