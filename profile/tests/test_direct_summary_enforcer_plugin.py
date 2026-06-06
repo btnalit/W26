@@ -350,6 +350,61 @@ def test_appends_deep_research_finalizer_section(tmp_path, monkeypatch):
     assert "Exa × Jina 深度研究" in result
 
 
+def test_auto_appends_cached_deep_research_artifact_for_report_like_reply(tmp_path, monkeypatch):
+    plugin, _home, workspace = load_plugin(monkeypatch, tmp_path)
+    manifest = workspace / "reports" / "artifacts" / "manifest-M011.json"
+    artifact = workspace / "reports" / "artifacts" / "deep-research-M011-20260606T120000Z.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps({"match_id": "M011"}), encoding="utf-8")
+    artifact.write_text(
+        json.dumps(
+            {
+                "artifact_type": "deep_research",
+                "artifact_version": "1.2",
+                "match_id": "M011",
+                "final_view": {
+                    "direction_label_zh": "研究倾向: 观察受让方",
+                    "action": "NO BET / WATCH",
+                    "why": "主报告无 actionable edge，研究层只给观察方向。",
+                    "upgrade_triggers": ["价格升到 2.10+"],
+                    "falsifiers": ["关键球员缺阵"],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = plugin.transform_llm_output(
+        platform="telegram",
+        session_id="s-cached-deep",
+        response_text=f"WC26 M011 Team A vs Team B — WATCH\nPath A 跨书商扫描\nManifest: {manifest}",
+    )
+
+    assert result is not None
+    assert result.startswith("CANONICAL SUMMARY")
+    assert "WC26_DEEP_RESEARCH_FINALIZER: completed" in result
+    assert "研究倾向: 观察受让方" in result
+    assert f"Deep Research: {artifact}" in result
+
+
+def test_report_like_reply_marks_deep_research_failed_when_no_artifact_exists(tmp_path, monkeypatch):
+    plugin, _home, workspace = load_plugin(monkeypatch, tmp_path)
+    manifest = workspace / "reports" / "artifacts" / "manifest-M012.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps({"match_id": "M012"}), encoding="utf-8")
+
+    result = plugin.transform_llm_output(
+        platform="telegram",
+        session_id="s-missing-deep",
+        response_text=f"WC26 M012 Team A vs Team B — WATCH\nPath A 跨书商扫描\nManifest: {manifest}",
+    )
+
+    assert result is not None
+    assert result.startswith("CANONICAL SUMMARY")
+    assert "WC26_DEEP_RESEARCH_FINALIZER: failed" in result
+    assert "no deep-research artifact found" in result
+
+
 def test_drops_deep_research_section_that_crosses_main_boundary(tmp_path, monkeypatch):
     plugin, _home, workspace = load_plugin(monkeypatch, tmp_path)
     manifest = workspace / "reports" / "artifacts" / "manifest-M009.json"

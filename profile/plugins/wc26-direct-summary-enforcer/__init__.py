@@ -108,7 +108,9 @@ def transform_llm_output(**kwargs) -> Optional[str]:
         )
         report_path = None
 
+    expects_deep_research = looks_like_wc26_report(response_text)
     deep_research_section = extract_deep_research_section(response_text)
+    had_deep_research_section = deep_research_section is not None
     if deep_research_section and deep_research_has_forbidden_boundary(deep_research_section):
         _log(
             "drop_deep_research_forbidden_boundary",
@@ -144,6 +146,29 @@ def transform_llm_output(**kwargs) -> Optional[str]:
                     error=str(contract_result.get("error") or "")[:500],
                 )
                 deep_research_section = None
+    elif expects_deep_research and not had_deep_research_section:
+        deep_research_section = deep_research_section_from_latest_artifact(manifest_path)
+        if deep_research_section:
+            contract_result = run_deep_research_contract(deep_research_section, manifest_path)
+            if not contract_result["ok"]:
+                _log(
+                    "drop_cached_deep_research_contract_failed",
+                    session_id=kwargs.get("session_id"),
+                    platform=platform,
+                    manifest_path=str(manifest_path),
+                    report_path=str(report_path) if report_path else "",
+                    artifact_path=contract_result.get("artifact_path") or "",
+                    error=str(contract_result.get("error") or "")[:500],
+                )
+                deep_research_section = deep_research_failed_section(
+                    manifest_path,
+                    reason="cached deep-research artifact failed contract validation",
+                )
+        else:
+            deep_research_section = deep_research_failed_section(
+                manifest_path,
+                reason="no deep-research artifact found for manifest match_id",
+            )
 
     result = run_direct_summary(
         manifest_path,
@@ -416,6 +441,104 @@ def append_deep_research_section(summary: str, section: str) -> str:
     if len(clean_section) > available:
         clean_section = clean_section[: max(0, available - 16)].rstrip() + "\n...(截断)"
     return summary + separator + clean_section
+
+
+def deep_research_section_from_latest_artifact(manifest_path: Path) -> Optional[str]:
+    match_id = _match_id_from_manifest(manifest_path)
+    if not match_id:
+        return None
+    artifact = _latest_deep_research_artifact(match_id)
+    if not artifact:
+        return None
+    try:
+        payload = json.loads(artifact.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if str(payload.get("match_id") or "") != match_id:
+        return None
+    final_view = payload.get("final_view") if isinstance(payload.get("final_view"), dict) else {}
+    direction = str(final_view.get("direction_label_zh") or "").strip()
+    action = str(final_view.get("action") or "").strip()
+    why = str(final_view.get("why") or "").strip()
+    triggers = _string_list(final_view.get("upgrade_triggers"))
+    falsifiers = _string_list(final_view.get("falsifiers"))
+
+    lines = [
+        "WC26_DEEP_RESEARCH_FINALIZER: completed",
+        "",
+        "🔬 Deep Research 深度解读",
+    ]
+    if direction:
+        lines.extend(["", direction])
+    if action:
+        lines.extend(["", f"当前动作: {action}"])
+    if why:
+        lines.extend(["", why])
+    if triggers:
+        lines.extend(["", "升级触发:"])
+        lines.extend(f"- {item}" for item in triggers[:4])
+    if falsifiers:
+        lines.extend(["", "撤回条件:"])
+        lines.extend(f"- {item}" for item in falsifiers[:4])
+    lines.extend(["", f"📁 Deep Research: {artifact}"])
+    return "\n".join(lines).strip()
+
+
+def deep_research_failed_section(manifest_path: Path, *, reason: str) -> str:
+    match_id = _match_id_from_manifest(manifest_path) or "unknown"
+    return (
+        "WC26_DEEP_RESEARCH_FINALIZER: failed\n"
+        f"reason: {reason}; match_id={match_id}. "
+        "已发送 artifact-backed 主摘要，后置研究未静默补写。"
+    )
+
+
+def _match_id_from_manifest(manifest_path: Path) -> Optional[str]:
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    for key in ("match_id", "local_match_id"):
+        value = str(payload.get(key) or "").strip()
+        if re.fullmatch(r"M\d{3}", value, flags=re.IGNORECASE):
+            return value.upper()
+    report_path = _report_from_manifest(manifest_path)
+    if report_path:
+        for match_id in _match_ids(report_path.name):
+            return match_id
+    for match_id in _match_ids(manifest_path.name):
+        return match_id
+    return None
+
+
+def _latest_deep_research_artifact(match_id: str) -> Optional[Path]:
+    artifact_dir = WORKSPACE / "reports" / "artifacts"
+    if not artifact_dir.exists():
+        return None
+    candidates = sorted(
+        artifact_dir.glob(f"deep-research-{match_id}-*.json"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for candidate in candidates:
+        if _is_existing_file(candidate):
+            return candidate
+    return None
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for item in value:
+        text = str(item or "").strip()
+        if text:
+            result.append(text)
+    return result
 
 
 def _paths_from_direct_request(text: str) -> tuple[Optional[Path], Optional[Path]]:
