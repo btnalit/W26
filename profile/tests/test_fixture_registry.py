@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 
 
@@ -75,22 +76,37 @@ def test_fixture_registry_uses_canonical_football_data_id(tmp_path: Path) -> Non
     assert match["away"] == "Switzerland"
 
 
-def test_fixture_registry_applies_official_venue_override_for_m009() -> None:
-    entry = fixture_registry.build_entry(
-        9,
-        {
-            "id": 537351,
-            "utcDate": "2026-06-14T17:00:00Z",
-            "stage": "GROUP_STAGE",
-            "group": "GROUP_E",
-            "status": "TIMED",
-            "homeTeam": {"name": "Germany", "tla": "GER"},
-            "awayTeam": {"name": "Curaçao", "tla": "CUW"},
-        },
+def test_fixture_registry_applies_external_venue_override(tmp_path: Path) -> None:
+    override_path = tmp_path / "venue-overrides.json"
+    override_path.write_text(
+        json.dumps({"venues": {"fd:537351": "Official Stadium, City"}}, ensure_ascii=False),
+        encoding="utf-8",
     )
+    old_value = os.environ.get("WC26_VENUE_OVERRIDES_PATH")
+    os.environ["WC26_VENUE_OVERRIDES_PATH"] = str(override_path)
+    try:
+        venue_overrides = fixture_registry.load_venue_overrides(override_path)
+        entry = fixture_registry.build_entry(
+            9,
+            {
+                "id": 537351,
+                "utcDate": "2026-06-14T17:00:00Z",
+                "stage": "GROUP_STAGE",
+                "group": "GROUP_E",
+                "status": "TIMED",
+                "homeTeam": {"name": "Team A", "tla": "AAA"},
+                "awayTeam": {"name": "Team B", "tla": "BBB"},
+            },
+            venue_overrides,
+        )
+    finally:
+        if old_value is None:
+            os.environ.pop("WC26_VENUE_OVERRIDES_PATH", None)
+        else:
+            os.environ["WC26_VENUE_OVERRIDES_PATH"] = old_value
 
     assert entry["local_ordinal_id"] == "M009"
-    assert entry["venue"] == "Houston Stadium (NRG Stadium), Houston"
+    assert entry["venue"] == "Official Stadium, City"
 
 
 def test_fixture_registry_detects_m_id_team_mismatch(tmp_path: Path) -> None:

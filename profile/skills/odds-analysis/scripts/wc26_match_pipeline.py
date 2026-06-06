@@ -39,11 +39,6 @@ report_guard = load_module("report_guard", SCRIPT_DIR / "report_guard.py")
 fixture_registry = load_module("fixture_registry", SCRIPT_DIR / "fixture_registry.py")
 
 
-VENUE_OVERRIDES = {
-    "M001": "Estadio Azteca (Mexico City Stadium), Mexico City",
-}
-
-
 def parse_utc(raw: str) -> datetime:
     dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     if dt.tzinfo is None:
@@ -75,7 +70,7 @@ def fixture_by_match_id(fixture_path: Path, match_id: str) -> dict[str, Any]:
         "kickoff_utc": item.get("kickoff_utc"),
         "stage": item.get("stage"),
         "group": item.get("group"),
-        "venue": VENUE_OVERRIDES.get(item["local_ordinal_id"], item.get("venue") or "TBD"),
+        "venue": item.get("venue") or "TBD",
         "fixture_status": item.get("status"),
     }
 

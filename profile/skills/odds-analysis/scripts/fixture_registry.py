@@ -10,22 +10,34 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import unicodedata
 from pathlib import Path
 from typing import Any
 
 
 DEFAULT_FIXTURE_PATH = Path("/hermesdata/worldcup-2026-handicap/snapshots/fixtures/football-data-wc-matches-latest.json")
+DEFAULT_VENUE_OVERRIDES_PATH = Path(
+    os.environ.get(
+        "WC26_VENUE_OVERRIDES_PATH",
+        "/hermesdata/worldcup-2026-handicap/snapshots/fixtures/venue-overrides.json",
+    )
+)
 
 
-OFFICIAL_VENUE_OVERRIDES = {
-    # football-data.org's early WC26 cache can omit venue even after FIFA's
-    # schedule pages publish the clean-stadium name. Keep the public report
-    # fact locked to this registry instead of letting summaries free-infer it.
-    "M009": "Houston Stadium (NRG Stadium), Houston",
-    "fd:537351": "Houston Stadium (NRG Stadium), Houston",
-    "537351": "Houston Stadium (NRG Stadium), Houston",
-}
+def load_venue_overrides(path: Path = DEFAULT_VENUE_OVERRIDES_PATH) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    raw = payload.get("venues", payload)
+    if not isinstance(raw, dict):
+        return {}
+    return {str(key): str(value).strip() for key, value in raw.items() if str(value).strip()}
 
 
 def normalize_name(value: str) -> str:
@@ -48,15 +60,21 @@ def _team_tla(item: dict[str, Any], side: str) -> str:
     return str(team.get("tla") or "").strip()
 
 
-def venue_for_entry(local_id: str, football_data_id: Any, item: dict[str, Any]) -> str | None:
+def venue_for_entry(
+    local_id: str,
+    football_data_id: Any,
+    item: dict[str, Any],
+    venue_overrides: dict[str, str] | None = None,
+) -> str | None:
+    overrides = venue_overrides or {}
     for key in (local_id, f"fd:{football_data_id}", str(football_data_id)):
-        value = OFFICIAL_VENUE_OVERRIDES.get(key)
+        value = overrides.get(key)
         if value:
             return value
     return item.get("venue")
 
 
-def build_entry(index: int, item: dict[str, Any]) -> dict[str, Any]:
+def build_entry(index: int, item: dict[str, Any], venue_overrides: dict[str, str] | None = None) -> dict[str, Any]:
     home = _team_name(item, "home")
     away = _team_name(item, "away")
     football_data_id = item.get("id")
@@ -73,7 +91,7 @@ def build_entry(index: int, item: dict[str, Any]) -> dict[str, Any]:
         "group": item.get("group"),
         "matchday": item.get("matchday"),
         "status": item.get("status"),
-        "venue": venue_for_entry(f"M{index:03d}", football_data_id, item),
+        "venue": venue_for_entry(f"M{index:03d}", football_data_id, item, venue_overrides),
         "home_norm": normalize_name(home),
         "away_norm": normalize_name(away),
     }
@@ -81,6 +99,7 @@ def build_entry(index: int, item: dict[str, Any]) -> dict[str, Any]:
 
 def load_registry(path: Path = DEFAULT_FIXTURE_PATH) -> dict[str, Any]:
     payload = json.loads(path.read_text(encoding="utf-8"))
+    venue_overrides = load_venue_overrides()
     playable: list[dict[str, Any]] = []
     for item in sorted(_matches_from_cache(payload), key=lambda m: (m.get("utcDate", ""), m.get("id", 0))):
         home = _team_name(item, "home")
@@ -89,7 +108,7 @@ def load_registry(path: Path = DEFAULT_FIXTURE_PATH) -> dict[str, Any]:
             continue
         playable.append(item)
 
-    entries = [build_entry(index, item) for index, item in enumerate(playable, 1)]
+    entries = [build_entry(index, item, venue_overrides) for index, item in enumerate(playable, 1)]
     return {
         "fixture_path": str(path),
         "entries": entries,

@@ -15,7 +15,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 
 WORKSPACE = Path(os.environ.get("WC26_WORKSPACE", "/hermesdata/worldcup-2026-handicap"))
@@ -476,6 +476,11 @@ def deep_research_section_from_latest_artifact(manifest_path: Path) -> Optional[
         lines.extend(["", f"当前动作: {action}"])
     if why:
         lines.extend(["", why])
+    market_profile = _market_profile_from_manifest(manifest_path)
+    profile_lines = _deep_research_market_profile_lines(market_profile)
+    if profile_lines:
+        lines.extend(["", "市场画像（Path C 描述性，不是下注信号）:"])
+        lines.extend(profile_lines)
     if triggers:
         lines.extend(["", "升级触发:"])
         lines.extend(f"- {item}" for item in triggers[:4])
@@ -539,6 +544,102 @@ def _string_list(value: object) -> list[str]:
         if text:
             result.append(text)
     return result
+
+
+def _market_profile_from_manifest(manifest_path: Path) -> Optional[dict[str, Any]]:
+    match_id = _match_id_from_manifest(manifest_path)
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(manifest, dict):
+        return None
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, list):
+        return None
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        raw = json.dumps(artifact, ensure_ascii=False).lower()
+        if "path_c_consistency" not in raw and "consistency_triangle" not in raw:
+            continue
+        path = _resolve_path(str(artifact.get("path") or ""))
+        if not _is_existing_file(path):
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        profile = payload.get("market_profile")
+        if isinstance(profile, dict):
+            return profile
+    return _latest_market_profile_artifact(match_id)
+
+
+def _latest_market_profile_artifact(match_id: Optional[str]) -> Optional[dict[str, Any]]:
+    if not match_id:
+        return None
+    artifact_dir = WORKSPACE / "reports" / "artifacts"
+    if not artifact_dir.exists():
+        return None
+    candidates = sorted(
+        artifact_dir.glob(f"consistency*{match_id}*.json"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for candidate in candidates:
+        try:
+            payload = json.loads(candidate.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        profile = payload.get("market_profile")
+        if isinstance(profile, dict):
+            return profile
+    return None
+
+
+def _deep_research_market_profile_lines(profile: Optional[dict[str, Any]]) -> list[str]:
+    if not isinstance(profile, dict):
+        return []
+    status = str(profile.get("status") or "")
+    confidence = str(profile.get("confidence") or "unknown")
+    fit = profile.get("fit") if isinstance(profile.get("fit"), dict) else {}
+    residual = fit.get("max_abs_residual_pp", "N/A")
+    if status == "suppressed":
+        return [
+            f"- 市场画像未生成/低可信: confidence={confidence} residual={residual}pp reason={profile.get('reason', 'fit_residual')}"
+        ]
+
+    lines = [f"- confidence={confidence} residual={residual}pp"]
+    most_likely = profile.get("most_likely_1x2") if isinstance(profile.get("most_likely_1x2"), dict) else {}
+    if most_likely:
+        lines.append(f"- 胜平负最可能: {most_likely.get('label')} {most_likely.get('prob_pct')}%")
+    total_lean = profile.get("total_line_lean") if isinstance(profile.get("total_line_lean"), dict) else {}
+    if total_lean:
+        label = total_lean.get("label")
+        pct = total_lean.get("over_pct") if total_lean.get("lean") == "over" else total_lean.get("under_pct")
+        lines.append(f"- 大小球倾向: {label} {pct}%")
+    top_scores = profile.get("top_scores") if isinstance(profile.get("top_scores"), list) else []
+    if top_scores:
+        scores = ", ".join(f"{row.get('score')} {row.get('prob_pct')}%" for row in top_scores[:3] if isinstance(row, dict))
+        if scores:
+            lines.append(f"- 最可能比分: {scores}")
+    top_margin = profile.get("top_margin") if isinstance(profile.get("top_margin"), dict) else {}
+    btts = profile.get("btts") if isinstance(profile.get("btts"), dict) else {}
+    extras: list[str] = []
+    if top_margin:
+        extras.append(f"净胜球: {top_margin.get('label')} {top_margin.get('prob_pct')}%")
+    if btts:
+        btts_label = "是" if btts.get("lean") == "yes" else "否"
+        btts_pct = btts.get("yes_pct") if btts.get("lean") == "yes" else btts.get("no_pct")
+        extras.append(f"BTTS: {btts_label} {btts_pct}%")
+    if extras:
+        lines.append("- " + " | ".join(extras))
+    return lines
 
 
 def _paths_from_direct_request(text: str) -> tuple[Optional[Path], Optional[Path]]:

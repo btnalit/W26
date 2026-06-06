@@ -354,8 +354,45 @@ def test_auto_appends_cached_deep_research_artifact_for_report_like_reply(tmp_pa
     plugin, _home, workspace = load_plugin(monkeypatch, tmp_path)
     manifest = workspace / "reports" / "artifacts" / "manifest-M011.json"
     artifact = workspace / "reports" / "artifacts" / "deep-research-M011-20260606T120000Z.json"
+    path_c = workspace / "reports" / "artifacts" / "consistency-M011.json"
     manifest.parent.mkdir(parents=True)
-    manifest.write_text(json.dumps({"match_id": "M011"}), encoding="utf-8")
+    manifest.write_text(
+        json.dumps(
+            {
+                "match_id": "M011",
+                "artifacts": [
+                    {
+                        "artifact_type": "consistency_triangle",
+                        "provides": ["path_c_consistency"],
+                        "path": str(path_c),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    path_c.write_text(
+        json.dumps(
+            {
+                "artifact_type": "consistency_triangle",
+                "market_profile": {
+                    "status": "ok",
+                    "confidence": "high",
+                    "fit": {"max_abs_residual_pp": 1.2},
+                    "most_likely_1x2": {"label": "Team A胜", "prob_pct": 49.3},
+                    "total_line_lean": {"lean": "under", "label": "Under 2.5", "under_pct": 54.9},
+                    "top_scores": [
+                        {"score": "1-1", "prob_pct": 12.6},
+                        {"score": "1-0", "prob_pct": 12.3},
+                        {"score": "2-0", "prob_pct": 9.5},
+                    ],
+                    "top_margin": {"label": "平局 净0", "prob_pct": 26.7},
+                    "btts": {"lean": "no", "no_pct": 51.2},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
     artifact.write_text(
         json.dumps(
             {
@@ -384,6 +421,9 @@ def test_auto_appends_cached_deep_research_artifact_for_report_like_reply(tmp_pa
     assert result.startswith("CANONICAL SUMMARY")
     assert "WC26_DEEP_RESEARCH_FINALIZER: completed" in result
     assert "研究倾向: 观察受让方" in result
+    assert "市场画像（Path C 描述性，不是下注信号）" in result
+    assert "胜平负最可能: Team A胜 49.3%" in result
+    assert "最可能比分: 1-1 12.6%, 1-0 12.3%, 2-0 9.5%" in result
     assert f"Deep Research: {artifact}" in result
 
 
@@ -403,6 +443,68 @@ def test_report_like_reply_marks_deep_research_failed_when_no_artifact_exists(tm
     assert result.startswith("CANONICAL SUMMARY")
     assert "WC26_DEEP_RESEARCH_FINALIZER: failed" in result
     assert "no deep-research artifact found" in result
+
+
+def test_cached_deep_research_uses_same_match_market_profile_fallback(tmp_path, monkeypatch):
+    plugin, _home, workspace = load_plugin(monkeypatch, tmp_path)
+    manifest = workspace / "reports" / "artifacts" / "manifest-M013.json"
+    no_profile_path_c = workspace / "reports" / "artifacts" / "consistency-M013-current.json"
+    profile_path_c = workspace / "reports" / "artifacts" / "consistency-M013-older.json"
+    artifact = workspace / "reports" / "artifacts" / "deep-research-M013-20260606T120000Z.json"
+    manifest.parent.mkdir(parents=True)
+    no_profile_path_c.write_text(json.dumps({"artifact_type": "consistency_triangle", "status": "no_signal"}), encoding="utf-8")
+    profile_path_c.write_text(
+        json.dumps(
+            {
+                "artifact_type": "consistency_triangle",
+                "market_profile": {
+                    "status": "ok",
+                    "confidence": "high",
+                    "fit": {"max_abs_residual_pp": 0.8},
+                    "most_likely_1x2": {"label": "平局", "prob_pct": 33.1},
+                    "top_scores": [{"score": "1-1", "prob_pct": 11.0}],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest.write_text(
+        json.dumps(
+            {
+                "match_id": "M013",
+                "artifacts": [
+                    {
+                        "artifact_type": "consistency_triangle",
+                        "provides": ["path_c_consistency"],
+                        "path": str(no_profile_path_c),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    artifact.write_text(
+        json.dumps(
+            {
+                "artifact_type": "deep_research",
+                "artifact_version": "1.2",
+                "match_id": "M013",
+                "final_view": {"direction_label_zh": "研究倾向: 观察平局", "action": "NO BET / WATCH"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = plugin.transform_llm_output(
+        platform="telegram",
+        session_id="s-market-profile-fallback",
+        response_text=f"WC26 M013 Team A vs Team B — WATCH\nPath A 跨书商扫描\nManifest: {manifest}",
+    )
+
+    assert result is not None
+    assert "WC26_DEEP_RESEARCH_FINALIZER: completed" in result
+    assert "胜平负最可能: 平局 33.1%" in result
+    assert "最可能比分: 1-1 11.0%" in result
 
 
 def test_drops_deep_research_section_that_crosses_main_boundary(tmp_path, monkeypatch):
