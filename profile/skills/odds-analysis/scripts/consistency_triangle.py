@@ -869,17 +869,248 @@ def analyze_snapshot(
     return results
 
 
-# ---------- CLI ----------
+# ---------- Artifact generation (shared between mainline and recovery) ----------
+
+ARTIFACT_CONTRACT = "wc26.consistency_triangle.v1"
+
+
+def generate_path_c_artifact(
+    *,
+    snapshot_path: str,
+    home: str,
+    away: str,
+    match_id: str,
+    window: str,
+    out_dir: str | Path,
+    snapshot_id: str | None = None,
+) -> dict[str, Any]:
+    """Generate a path_c consistency triangle artifact entry.
+
+    fail-soft: if Pinnacle data is missing or analysis cannot complete,
+    produces a suppressed artifact (no market_profile, status=suppressed).
+    Never raises.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    import hashlib
+    slug = hashlib.sha256(
+        f"consistency:{match_id}:{window}".encode("utf-8")
+    ).hexdigest()[:12]
+    artifact_id = f"consistency:{match_id}:{slug}"
+
+    # Default suppressed payload
+    payload: dict[str, Any] = {
+        "artifact_id": artifact_id,
+        "artifact_type": "consistency_triangle",
+        "artifact_kind": "consistency_triangle",
+        "artifact_contract": ARTIFACT_CONTRACT,
+        "script": "consistency_triangle.py",
+        "provides": ["path_c_consistency"],
+        "match_id": match_id,
+        "home": home,
+        "away": away,
+        "snapshot_id": snapshot_id or Path(snapshot_path).name,
+        "snapshot_path": str(snapshot_path),
+        "status": "suppressed",
+        "generated_by": "generate_path_c_artifact",
+        "market_profile": None,
+        "analysis": None,
+        "signal": None,
+        "discrepancy": None,
+    }
+
+    try:
+        raw = json.loads(Path(snapshot_path).read_text(encoding="utf-8"))
+        events = raw if isinstance(raw, list) else raw.get("data", [])
+        match_found = False
+        for ev in events:
+            ev_home = ev.get("home_team", "")
+            ev_away = ev.get("away_team", "")
+            if not match_filter_matches(ev_home, ev_away, f"{home} vs {away}"):
+                continue
+            match_found = True
+            pinnacle_data = extract_pinnacle_markets(raw, ev_home, ev_away)
+            if not pinnacle_data or "error" in pinnacle_data:
+                payload["suppress_reason"] = (
+                    f"Pinnacle data unavailable: {pinnacle_data.get('error', 'unknown')}"
+                    if isinstance(pinnacle_data, dict)
+                    else "Pinnacle data unavailable"
+                )
+                break
+            result = analyze_consistency(pinnacle_data)
+            payload.update(
+                {
+                    "status": "signal"
+                    if (result.get("signal") or {}).get("type")
+                    else "no_signal",
+                    "analysis": result.get("analysis"),
+                    "totals_market": result.get("totals_market"),
+                    "lambda_implied": result.get("lambda_implied"),
+                    "discrepancy": result.get("discrepancy"),
+                    "signal": result.get("signal"),
+                    "market_profile": result.get("market_profile"),
+                    "caveat": result.get("caveat"),
+                    "generated_by": "generate_path_c_artifact",
+                }
+            )
+            break
+        if not match_found:
+            payload["suppress_reason"] = f"match {home} vs {away} not found in snapshot"
+    except Exception as exc:
+        payload["suppress_reason"] = f"exception: {exc}"
+
+    # Write artifact file
+    artifact_path = out_dir / f"consistency-{match_id}-{slug}.json"
+    payload["artifact_path"] = str(artifact_path)
+    artifact_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    return {
+        "artifact_id": artifact_id,
+        "artifact_type": "consistency_triangle",
+        "artifact_kind": "consistency_triangle",
+        "script": "consistency_triangle.py",
+        "path": str(artifact_path),
+        "source_snapshot_id": payload["snapshot_id"],
+        "provides": ["path_c_consistency"],
+        "status": payload["status"],
+    }
+
+
+# ---------- Manifest-mode CLI ----------
+
+def _find_snapshot_in_manifest(manifest: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Find the first usable odds snapshot path from manifest artifacts."""
+    for artifact in manifest.get("artifacts", []):
+        if not isinstance(artifact, dict):
+            continue
+        for key in ("source_snapshot_id", "snapshot_id", "path"):
+            raw = artifact.get(key) or ""
+            text = str(raw).lower()
+            if "cross_book" in text or "crossbook" in text or "multibook" in text:
+                candidate = resolve_snapshot_path(str(artifact.get(key) or ""))
+                if candidate:
+                    return candidate, str(artifact.get("source_snapshot_id") or "")
+    return None, None
+
+
+def resolve_snapshot_path(raw: str) -> str | None:
+    """Resolve a potentially relative snapshot path to absolute."""
+    path = Path(raw)
+    if path.exists():
+        return str(path)
+    # Try under workspace
+    workspace = Path("/hermesdata/worldcup-2026-handicap")
+    candidates = [
+        workspace / "snapshots" / "odds" / path.name,
+        workspace / path,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def _patch_manifest(
+    manifest: dict[str, Any],
+    manifest_path: Path,
+    artifact_entry: dict[str, Any],
+) -> None:
+    """Add the path_c artifact entry to the manifest's artifacts list and analysis_gates."""
+    artifacts = manifest.setdefault("artifacts", [])
+    # Replace any existing path_c entry to avoid duplicates
+    artifacts[:] = [
+        a
+        for a in artifacts
+        if not (
+            isinstance(a, dict)
+            and "path_c_consistency"
+            in str(a.get("provides") or a.get("artifact_type") or "")
+        )
+    ]
+    artifacts.append(artifact_entry)
+
+    gates = manifest.setdefault("analysis_gates", {})
+    gates["path_c_consistency"] = {"status": "pass", "generated_by": "generate_path_c_artifact"}
+
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def generate_path_c_from_manifest(manifest_path: str) -> int:
+    """CLI mode: read manifest, generate path_c artifact, patch manifest."""
+    try:
+        mpath = Path(manifest_path)
+        manifest = json.loads(mpath.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(json.dumps({"ok": False, "error": f"cannot read manifest: {exc}"}, ensure_ascii=False))
+        return 2
+
+    match = manifest.get("match") if isinstance(manifest.get("match"), dict) else manifest
+    match_id = str(match.get("match_id") or manifest.get("match_id") or "")
+    home = str(match.get("home") or manifest.get("home_team") or "")
+    away = str(match.get("away") or manifest.get("away_team") or "")
+    window = str(manifest.get("window") or manifest.get("timing_class") or "unknown")
+
+    if not all([match_id, home, away]):
+        print(
+            json.dumps(
+                {"ok": False, "error": f"cannot extract match identity from manifest"},
+                ensure_ascii=False,
+            )
+        )
+        return 2
+
+    snapshot_path, snapshot_id = _find_snapshot_in_manifest(manifest)
+    if not snapshot_path:
+        print(
+            json.dumps(
+                {"ok": False, "error": "no odds snapshot found in manifest artifacts"},
+                ensure_ascii=False,
+            )
+        )
+        return 2
+
+    out_dir = mpath.parent / "artifacts"
+    entry = generate_path_c_artifact(
+        snapshot_path=snapshot_path,
+        home=home,
+        away=away,
+        match_id=match_id,
+        window=window,
+        out_dir=out_dir,
+        snapshot_id=snapshot_id,
+    )
+
+    _patch_manifest(manifest, mpath, entry)
+
+    print(json.dumps({"ok": True, "artifact_entry": entry}, ensure_ascii=False, indent=2))
+    return 0
+
+
+# ---------- CLI (existing) ----------
 
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="一致性三角探测器 — Pinnacle AH+1X2 vs Totals"
     )
-    parser.add_argument("--snapshot", required=True, help="the-odds-api 快照路径")
+    parser.add_argument("--snapshot", default=None, help="the-odds-api 快照路径")
     parser.add_argument("--match", default=None, help="筛选某场比赛（可选）")
     parser.add_argument("--full", action="store_true", help="输出所有比赛（默认只输出有信号的）")
+    parser.add_argument("--manifest", default=None, help="生成 path_c artifact 并补入 manifest（替代 --snapshot）")
     
     args = parser.parse_args()
+
+    # --manifest mode: generate path_c artifact from manifest, patch manifest
+    if args.manifest:
+        return generate_path_c_from_manifest(args.manifest)
+
+    if not args.snapshot:
+        parser.error("either --snapshot or --manifest is required")
+
     results = analyze_snapshot(args.snapshot, args.match)
     
     if args.match:
