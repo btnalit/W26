@@ -306,9 +306,10 @@ def _validate_path_a_recompute(
         return
 
     recomputed_markets: dict[str, dict[str, Any]] = {}
-    edge_threshold = _as_float(artifact_payload.get("edge_threshold")) or 0.02
-    actionable_threshold = _as_float(artifact_payload.get("actionable_threshold")) or PATH_A_ACTIONABLE_EV_THRESHOLD
-    suspect_threshold = _as_float(artifact_payload.get("suspect_threshold")) or 0.08
+    # Use module constants, NOT artifact payload, to maintain independence
+    edge_threshold = getattr(module, "EDGE_THRESHOLD", 0.02)
+    actionable_threshold = getattr(module, "ACTIONABLE_EV_THRESHOLD", PATH_A_ACTIONABLE_EV_THRESHOLD)
+    suspect_threshold = getattr(module, "SUSPECT_THRESHOLD", 0.08)
     for market_name, market_result in (artifact_payload.get("markets") or {}).items():
         if not isinstance(market_result, dict) or market_result.get("status") != "ok":
             continue

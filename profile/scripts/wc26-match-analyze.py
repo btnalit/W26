@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import re
 import subprocess
 import sys
@@ -39,8 +38,6 @@ PYTHON = sys.executable
 MATCH_REPORT_DIR = WORKSPACE / "reports" / "match"
 ARTIFACT_DIR = WORKSPACE / "reports" / "artifacts"
 TEMPLATE_PATH = SCRIPT_DIR.parent / "templates" / "report-template.md"
-KICKOFF_FALLBACK = "2026-06-11T19:00:00Z"  # for demo/oracle only
-
 SANPSHOT_HEALTH_DIR = WORKSPACE / "snapshots" / "health"
 
 
@@ -62,38 +59,26 @@ def read_json(path: Path, default: Any = None) -> Any:
         return default
 
 
-def shin_devig(odds: list[float], max_iter: int = 200) -> list[float]:
-    """Shin devig (内联, 零依赖)."""
-    pi = [1.0 / o for o in odds]
-    Z = sum(pi)
-    b = [p / Z for p in pi]
+# ── 导入 devig.py 的标准去水函数 ──
+_DEVIG_MODULE: Any = None
 
-    def p_of(z: float) -> list[float]:
-        return [(math.sqrt(z * z + 4 * (1 - z) * bi * bi * Z) - z) / (2 * (1 - z)) for bi in b]
-
-    lo, hi = 1e-6, 0.4
-    for _ in range(max_iter):
-        z = (lo + hi) / 2
-        s = sum(p_of(z))
-        if s > 1:
-            lo = z
-        else:
-            hi = z
-    return p_of((lo + hi) / 2)
+def _load_devig_module():
+    global _DEVIG_MODULE
+    if _DEVIG_MODULE is not None:
+        return _DEVIG_MODULE
+    devig_path = SKILL_SCRIPTS / "devig.py"
+    if devig_path.exists():
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_devig_module", str(devig_path))
+        _DEVIG_MODULE = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_DEVIG_MODULE)
+        return _DEVIG_MODULE
+    raise ImportError(f"devig.py not found at {devig_path}")
 
 
-def multiplicative_devig(odds: list[float]) -> list[float]:
-    imp = [1.0 / o for o in odds]
-    s = sum(imp)
-    return [p / s for p in imp]
-
-
-def power_devig(odds: list[float]) -> list[float]:
-    """Power devig (exponent 0.85 default)."""
-    c = 0.85
-    imp = [1.0 / (o ** c) for o in odds]
-    s = sum(imp)
-    return [p / s for p in imp]
+def get_devig_method(name: str):
+    mod = _load_devig_module()
+    return getattr(mod, name, None)
 
 
 def normalize_book_key(raw: str | None) -> str:
@@ -155,19 +140,20 @@ def generate_devig_artifact(
     match_id: str, market_key: str, outcomes: list[dict],
     captured_at: str, snapshot_id: str,
 ) -> dict[str, Any]:
-    """从 Pinnacle outcomes 生成 devig artifact (不再调用 devig.py CLI)."""
+    """从 Pinnacle outcomes 生成 devig artifact (使用 devig.py 规范去水)."""
+    mod = _load_devig_module()
     odds = [o["price"] for o in outcomes]
     outcome_names = [o["name"] for o in outcomes]
-    nv_shin = shin_devig(odds)
-    nv_mult = multiplicative_devig(odds)
-    nv_power = power_devig(odds)
+    nv_shin = mod.devig_shin(odds)
+    nv_mult = mod.devig_multiplicative(odds)
+    nv_power = mod.devig_power(odds)
     overround = sum(1.0 / o for o in odds) - 1.0
 
-    # survives_all_methods: all 3 methods agree on which outcome has highest prob
+    # methods_agree_on_favorite: all 3 methods agree on which outcome has highest prob
     shin_best = max(range(len(nv_shin)), key=lambda i: nv_shin[i])
     mult_best = max(range(len(nv_mult)), key=lambda i: nv_mult[i])
     power_best = max(range(len(nv_power)), key=lambda i: nv_power[i])
-    survives = (shin_best == mult_best == power_best)
+    methods_agree = (shin_best == mult_best == power_best)
 
     devig_methods = {
         "shin": [round(p, 6) for p in nv_shin],
@@ -186,7 +172,7 @@ def generate_devig_artifact(
     return {
         "artifact_id": f"devig-{market_key}-{match_id}-{stable_id(captured_at)}",
         "artifact_type": "devig",
-        "script": "wc26-match-analyze.py (inline)",
+        "script": "wc26-match-analyze.py (via devig.py import)",
         "provides": ["no_vig"],
         "match_id": match_id,
         "market": market_key,
@@ -201,7 +187,7 @@ def generate_devig_artifact(
         "no_vig_multiplicative": [round(p, 6) for p in nv_mult],
         "no_vig_power": [round(p, 6) for p in nv_power],
         "devig_methods": devig_methods,
-        "survives_all_methods": survives,
+        "methods_agree_on_favorite": methods_agree,
         "overround": round(overround, 6),
         "devig_method": "shin",
     }
@@ -275,7 +261,10 @@ def run_orchestrator(
     snapshot_data = read_json(snapshot_path) or {}
     captured_at = snapshot_data.get("captured_at_utc") or match.get("captured_at_utc") or utc_now()
     snapshot_id = snapshot_path.name
-    kickoff_utc = match.get("commence_time") or KICKOFF_FALLBACK
+    kickoff_utc = match.get("commence_time")
+    if not kickoff_utc:
+        print(f"[match-analyze]   错误: match 数据中无 kickoff_time (commence_time 缺失)", file=sys.stderr)
+        return 1
 
     print(f"[match-analyze] {match_id}: {match_home} vs {match_away}")
     print(f"[match-analyze]   snapshot: {snapshot_path.name}")
@@ -320,24 +309,44 @@ def run_orchestrator(
         outcomes = pinnacle.get(mkey, [])
         if not outcomes:
             continue
-        devig_artifact = generate_devig_artifact(match_id, mkey, outcomes, captured_at, snapshot_id)
-        devig_path = output_dir / f"devig-{mkey}-{match_id}-{stable_id(captured_at)}.json"
-        write_json(devig_path, devig_artifact)
-        devig_paths[mkey] = devig_path
-        aid = f"devig:{match_id}:{mkey}:{stable_id(captured_at)}"
-        cap_map = {"h2h": "devig_1x2", "spreads": "asian_handicap", "totals": "totals"}
-        provides = ["no_vig", cap_map.get(mkey, "no_vig")]
-        artifacts.append({
-            "artifact_id": aid,
-            "path": str(devig_path.resolve()),
-            "provides": provides,
-            "artifact_type": "devig",
-            "market": mkey,
-            "bookmaker": "pinnacle",
-        })
-        print(f"[match-analyze]    devig-{mkey}: {devig_path.name}  ({len(outcomes)} outcomes)")
+
+        # For totals, group by @point to avoid multi-line devig contamination.
+        # spreads/h2h keep all outcomes together (spreads: 1 outcome per point → no devig needed per-point).
+        if mkey in ("h2h", "spreads"):
+            outcome_groups: list[list[dict]] = [outcomes]  # type: ignore[assignment]
+            group_keys: list[str] = [mkey]
+        else:  # totals
+            groups: dict[Any, list[dict]] = {}
+            for o in outcomes:
+                pt = o.get("point", "none")
+                groups.setdefault(pt, []).append(o)
+            outcome_groups = list(groups.values())
+            group_keys = [f"{mkey}@{pt}" if pt != "none" else mkey for pt in groups]
+
+        for gk, g_outcomes in zip(group_keys, outcome_groups):
+            devig_artifact = generate_devig_artifact(match_id, mkey, g_outcomes, captured_at, snapshot_id)
+            # Tag which line this devig covers
+            if gk != mkey:
+                devig_artifact["line"] = gk.split("@", 1)[1] if "@" in gk else None
+            devig_path = output_dir / f"devig-{gk}-{match_id}-{stable_id(captured_at)}.json"
+            write_json(devig_path, devig_artifact)
+            devig_paths[gk] = devig_path
+            aid = f"devig:{match_id}:{gk}:{stable_id(captured_at)}"
+            cap_map = {"h2h": "devig_1x2", "spreads": "asian_handicap", "totals": "totals"}
+            provides = ["no_vig", cap_map.get(mkey, "no_vig")]
+            artifacts.append({
+                "artifact_id": aid,
+                "path": str(devig_path.resolve()),
+                "provides": provides,
+                "artifact_type": "devig",
+                "market": mkey,
+                "line_group": gk,
+                "bookmaker": "pinnacle",
+            })
+            print(f"[match-analyze]    devig-{gk}: {devig_path.name}  ({len(g_outcomes)} outcomes)")
 
     # ── Step 2: cross_book_scan (Path A) ──
+    crossbook_ok = False
     crossbook_path = output_dir / f"crossbook-{match_id}-{stable_id(captured_at)}.json"
     scan_cmd = [
         PYTHON, str(SKILL_SCRIPTS / "cross_book_scan.py"),
@@ -350,7 +359,16 @@ def run_orchestrator(
         scan_ret = subprocess.run(scan_cmd, capture_output=True, text=True, timeout=120)
         if scan_ret.returncode != 0:
             print(f"[match-analyze]   crossbook 失败: {scan_ret.stderr[:300]}", file=sys.stderr)
+            artifacts.append({
+                "artifact_id": f"crossbook:{match_id}:{stable_id(captured_at)}",
+                "path": str(crossbook_path.resolve()),
+                "provides": [],
+                "artifact_type": "crossbook_scan",
+                "status": "failed",
+                "error": (scan_ret.stderr or scan_ret.stdout or "unknown error").strip()[:300],
+            })
         else:
+            crossbook_ok = True
             crossbook_aid = f"crossbook:{match_id}:{stable_id(captured_at)}"
             artifacts.append({
                 "artifact_id": crossbook_aid,
@@ -361,6 +379,14 @@ def run_orchestrator(
             print(f"[match-analyze]   crossbook: {crossbook_path.name}")
     except subprocess.TimeoutExpired:
         print(f"[match-analyze]   crossbook 超时", file=sys.stderr)
+        artifacts.append({
+            "artifact_id": f"crossbook:{match_id}:{stable_id(captured_at)}",
+            "path": str(crossbook_path.resolve()),
+            "provides": [],
+            "artifact_type": "crossbook_scan",
+            "status": "failed",
+            "error": "timeout (120s)",
+        })
 
     if mode == "fast":
         # fast 模式: 产 minimal manifest + 走 direct_summary, 禁止 LLM 手工组装
@@ -417,12 +443,16 @@ def run_orchestrator(
     has_totals_devig = any(a.get("artifact_type") == "devig" and a.get("market") == "totals" for a in artifacts)
     has_crossbook = any(a.get("artifact_type") == "crossbook_scan" for a in artifacts)
     gates["devig_three_method"] = {"status": "pending", "reason": "produced, awaiting report_contract verification"}
-    gates["path_a_crossbook"] = {"status": "pending", "reason": "produced, awaiting report_contract verification"}
+    gates["path_a_crossbook"] = {
+        "status": "pending" if crossbook_ok else ("failed" if any(a.get("artifact_type") == "crossbook_scan" and a.get("status") == "failed" for a in artifacts) else "skipped_not_applicable"),
+        "reason": "produced, awaiting report_contract verification" if crossbook_ok else ("subprocess failed" if any(a.get("artifact_type") == "crossbook_scan" and a.get("status") == "failed" for a in artifacts) else ""),
+    }
     gates["asian_handicap"] = {"status": "pending" if has_spreads else "skipped_not_applicable", "reason": "produced, awaiting report_contract verification" if has_spreads else ""}
     gates["totals"] = {"status": "pending" if has_totals_devig else "skipped_not_applicable", "reason": "produced, awaiting report_contract verification" if has_totals_devig else ""}
     gates["path_b_model_diagnostic"] = {"status": "diagnostic", "reason": "no model data at generation time"}
     gates["source_freshness"] = {"status": "pass"}
     # path_c_consistency + mechanism_audit 由后续步骤设置
+    manifest["manifest_path"] = str(manifest_path)
     write_json(manifest_path, manifest)
     print(f"[match-analyze]   manifest: {manifest_path.name}  ({len(artifacts)} artifacts)")
     print(f"[match-analyze]   gates: {len(gates)} set")
@@ -551,7 +581,7 @@ def generate_report(
     health_note: str,
 ) -> str:
     """Generate minimal report markdown from manifest + match data."""
-    kickoff = match.get("commence_time") or KICKOFF_FALLBACK
+    kickoff = match.get('commence_time', '')
     lines = [
         f"# WC26 {match_id} {home} vs {away} - {window} Handicap Report",
         "",
@@ -564,7 +594,7 @@ def generate_report(
         f"window: {window}",
         f"source_quality: {manifest.get('source_quality', 'B')}",
         f"final_status: {manifest.get('final_status', 'watch')}",
-        f"artifact_manifest_path: {manifest.get('manifest_id', '')}",
+        f"artifact_manifest_path: {manifest.get('manifest_path', '')}",
         "artifact_contract_status: pending",
         "report_guard_status: pending",
         "",
@@ -638,7 +668,7 @@ def main() -> int:
     ap.add_argument("--snapshot", required=True, help="the-odds-api multibook snapshot path")
     ap.add_argument("--match-home", required=True, help="Home team name")
     ap.add_argument("--match-away", required=True, help="Away team name")
-    ap.add_argument("--match-id", default="Mxxx", help="Match ID (e.g. M001)")
+    ap.add_argument("--match-id", required=True, help="Match ID (e.g. M001)")
     ap.add_argument("--window", default="T-24h_confirm", help="Analysis window")
     ap.add_argument("--timing-class", default="confirmation", help="Timing class")
     ap.add_argument("--output", default=None, help="Output directory (default: reports/artifacts)")

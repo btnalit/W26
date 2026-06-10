@@ -345,7 +345,16 @@ def build_summary(manifest_path: str | Path, report_path: str | Path | None = No
 
     contract_status = "PASS" if contract.get("valid") else "FAIL"
     guard_status = "PASS" if guard and guard.get("safe_to_relay") else ("未运行" if guard is None else "FAIL")
-    relay_ready = contract.get("valid") and (guard is None or guard.get("safe_to_relay"))
+    # In live (full) mode, guard is mandatory (--report required).
+    # Partial and fast manifests skip guard intentionally.
+    manifest_mode = str(manifest.get("mode", "")).strip().lower()
+    report_completeness = str(manifest.get("report_completeness", "complete")).strip().lower()
+    if guard:
+        relay_ready = contract.get("valid") and guard.get("safe_to_relay")
+    elif manifest_mode == "live" and report_completeness == "complete":
+        relay_ready = False  # live full mode requires --report
+    else:
+        relay_ready = contract.get("valid")  # fast/partial: guard optional
     source_quality_text = str(manifest.get("source_quality", "TBD"))
     source_quality_cap = first_present(contract.get("source_quality_cap"), manifest.get("source_quality_cap"))
     if source_quality_cap and str(source_quality_cap) != source_quality_text:
