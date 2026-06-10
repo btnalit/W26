@@ -230,7 +230,7 @@ Research 失败时, 发送 artifact-backed `rich_summary.py` fallback, 并说明
 Deep Research 不能成为主报告门禁。若后置研究缺少可用 finding, 或某些新闻
 finding 未通过时间证据, 只过滤/忽略那些 finding; 主报告仍按 guarded
 `rich_summary.py` 正常发送。只有报告本身缺 manifest/report 绑定时, 才交给
-`wc26-direct-summary-enforcer` / `blocked_recovery.py` 走恢复或短告警。
+`blocked_recovery.py` 走恢复或短告警。
 
 市场画像只允许来自 `consistency_triangle.py` 的 `market_profile` artifact
 字段。Deep Research 可以解释这张画像, 但不能自己重算比分概率、大小倾向或

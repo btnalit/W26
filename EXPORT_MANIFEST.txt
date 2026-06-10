@@ -1,8 +1,6 @@
 ﻿.gitignore
 EXPORT_MANIFEST.txt
 profile/MEMORY.md
-profile/plugins/wc26-direct-summary-enforcer/__init__.py
-profile/plugins/wc26-direct-summary-enforcer/plugin.yaml
 profile/profile.yaml
 profile/scripts/wc26_cron_payload.py
 profile/scripts/wc26-apply-approved-adjustment.py
@@ -53,7 +51,6 @@ profile/tests/test_cross_book_scan.py
 profile/tests/test_deep_research_contract.py
 profile/tests/test_devig_math.py
 profile/tests/test_direct_summary_contract.py
-profile/tests/test_direct_summary_enforcer_plugin.py
 profile/tests/test_fixture_registry.py
 profile/tests/test_market_profile.py
 profile/tests/test_mechanism_audit.py
