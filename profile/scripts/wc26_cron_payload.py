@@ -687,6 +687,28 @@ def odds_broad_scan() -> int:
             },
         )
         payload.update(event_count=len(data), bookmaker_count=len(book_keys), snapshot_path=str(path))
+
+        # ── Validate snapshot quality before any downstream consumer sees it ──
+        validator = SCRIPT_DIR / "snapshot_validator.py"
+        health_dir = WORKSPACE / "snapshots" / "health"
+        health_path = health_dir / f"{path.stem}.health.json"
+        try:
+            vret = subprocess.run(
+                [python_bin(), str(validator), str(path),
+                 "--output", str(health_path)],
+                cwd=str(WORKSPACE),
+                text=True,
+                timeout=60,
+            )
+            health_status = "validated"
+            if vret.returncode == 2:
+                health_status = "has_errors"
+            elif vret.returncode == 1:
+                health_status = "has_warnings"
+            payload["snapshot_health"] = str(health_path)
+            payload["snapshot_health_status"] = health_status
+        except Exception as vexc:
+            payload["snapshot_health_error"] = str(vexc)[:200]
     else:
         payload.update(error=response.text[:240], exit_code=1)
     return emit(payload)
@@ -725,6 +747,28 @@ def oddspapi_ah_snapshot() -> int:
         path = WORKSPACE / "snapshots" / "odds" / f"oddspapi-t16-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}.json"
         write_json(path, {"captured_at_utc": utc_now(), "source": "oddspapi", "data": data})
         payload.update(row_count=len(data) if isinstance(data, list) else None, snapshot_path=str(path))
+
+        # ── Validate snapshot quality ──
+        validator = SCRIPT_DIR / "snapshot_validator.py"
+        health_dir = WORKSPACE / "snapshots" / "health"
+        health_path = health_dir / f"{path.stem}.health.json"
+        try:
+            vret = subprocess.run(
+                [python_bin(), str(validator), str(path),
+                 "--output", str(health_path)],
+                cwd=str(WORKSPACE),
+                text=True,
+                timeout=60,
+            )
+            health_status = "validated"
+            if vret.returncode == 2:
+                health_status = "has_errors"
+            elif vret.returncode == 1:
+                health_status = "has_warnings"
+            payload["snapshot_health"] = str(health_path)
+            payload["snapshot_health_status"] = health_status
+        except Exception as vexc:
+            payload["snapshot_health_error"] = str(vexc)[:200]
     else:
         payload.update(error=response.text[:240], exit_code=1)
     return emit(payload)

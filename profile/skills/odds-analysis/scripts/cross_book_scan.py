@@ -26,6 +26,7 @@ import argparse
 import json
 import math
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -149,7 +150,7 @@ def ev_band(ev: float) -> str:
 
 def parse_odds_snapshot(snapshot_path: str,
                         match_home: str | None = None,
-                        match_away: str | None = None) -> dict[str, dict[str, dict[str, float]]]:
+                        match_away: str | None = None) -> dict[str, Any]:
     """
     把 the-odds-api 快照（全 board）转成 per-market board dict。
 
@@ -158,11 +159,17 @@ def parse_odds_snapshot(snapshot_path: str,
       - spreads (AH)：只比同线（与 Pinnacle 相同盘口线）
       - totals：只比同线（与 Pinnacle 相同盘口线）
 
-    返回: { market_key: { book_key: { outcome_label: decimal_odds } } }
-    market_key: "h2h" | "spreads" | "totals"
+    返回: { "board": { market_key: { book_key: { outcome_label: decimal_odds } } },
+            "fetched_at_utc": str | None,
+            "snapshot_path": str }
+    每条 market 的 board 下以 "_anchor_meta" 保留 Pinnacle 的 last_update 时序信息。
     """
     with open(snapshot_path) as f:
         data = json.load(f)
+
+    fetched_at_utc = None
+    if isinstance(data, dict):
+        fetched_at_utc = data.get("captured_at_utc")
 
     matches = data.get("data", data) if isinstance(data, dict) else data
     for match in matches:
@@ -172,18 +179,20 @@ def parse_odds_snapshot(snapshot_path: str,
             if home.lower() != match_home.lower() or away.lower() != match_away.lower():
                 continue
 
-        board: dict[str, dict[str, dict[str, float]]] = {
+        board: dict[str, dict[str, Any]] = {
             "h2h": {}, "spreads": {}, "totals": {}
         }
 
-        # First pass: identify Pinnacle's line per market
+        # First pass: identify Pinnacle's line per market, capturing last_update
         pinnacle_markets: dict[str, Any] = {}
+        pinnacle_updates: dict[str, str | None] = {}
         for bm in match.get("bookmakers", []):
             if normalize_book_key(bm.get("key"), bm.get("title")) == "pinnacle":
                 for market in bm.get("markets", []):
                     mkey = market.get("key")
                     if mkey in ("h2h", "spreads", "totals"):
                         pinnacle_markets[mkey] = market
+                        pinnacle_updates[mkey] = market.get("last_update")
 
         # Second pass: collect prices from all books
         for bm in match.get("bookmakers", []):
@@ -230,30 +239,61 @@ def parse_odds_snapshot(snapshot_path: str,
                                 label = f"{outcome.get('name', '').lower()}@{pt}"
                                 board["totals"][key][label] = outcome["price"]
 
-        return board
-    return {"h2h": {}, "spreads": {}, "totals": {}}
+        # ── FIX-1: 写入 Pinnacle last_update 时序信息 ──
+        for mkey in ("h2h", "spreads", "totals"):
+            lu = pinnacle_updates.get(mkey)
+            if lu is not None:
+                board[mkey]["_anchor_meta"] = {"last_update_utc": lu}
+            elif mkey in pinnacle_markets:
+                board[mkey]["_anchor_meta"] = {"last_update_utc": None}
+
+        return {"board": board, "fetched_at_utc": fetched_at_utc, "snapshot_path": snapshot_path}
+    return {"board": {"h2h": {}, "spreads": {}, "totals": {}},
+            "fetched_at_utc": fetched_at_utc, "snapshot_path": snapshot_path}
 
 
 # ── 核心扫描器 ──
 
-def scan_market(board: dict[str, dict[str, dict[str, float]]],
+def scan_market(board: dict[str, dict[str, Any]],
                 market_key: str,
                 outcomes: list[str],
                 sharp_books: tuple[str, ...] = SHARP_BOOKS,
                 edge_threshold: float = EDGE_THRESHOLD,
                 actionable_threshold: float = ACTIONABLE_EV_THRESHOLD,
                 suspect_threshold: float = SUSPECT_THRESHOLD,
-                primary: str = PRIMARY) -> dict[str, Any]:
+                primary: str = PRIMARY,
+                fetched_at_utc: str | None = None,
+                max_leg_age_min: float = 90.0,
+                anchor_meta: dict | None = None) -> dict[str, Any]:
     """
     board: 来自 parse_odds_snapshot 的完整 board（多市场）
     market_key: "h2h" | "spreads" | "totals"
     outcomes: 该市场的 key 列表, 如 ["home","draw","away"] 或 ["over@2.5","under@2.5"]
+    fetched_at_utc: 快照抓取时间, 用于 FIX-1 per-leg 时效校验
+    max_leg_age_min: 锚腿超龄阈值（默认 90 分钟）
+    anchor_meta: FIX-1 时序数据, 由 caller 从 board 读出后传入（避免多线调用时 mutation）
 
     返回: { status, sharp_anchor, sharp_overround, devig_primary, fair_probs, quotes, edges }
     """
     market_data = board.get(market_key, {})
     if not market_data:
         return {"status": "no_market_data", "quotes": [], "edges": [], "quotes_scanned": 0}
+
+    # ── FIX-1: 提取 Pinnacle 腿的 last_update 时序信息 ──
+    anchor_meta = anchor_meta or {}
+    if isinstance(market_data, dict) and not anchor_meta:
+        raw = market_data.get("_anchor_meta")
+        if isinstance(raw, dict):
+            anchor_meta = dict(raw)
+    anchor_last_update_utc = anchor_meta.get("last_update_utc") if isinstance(anchor_meta, dict) else None
+    anchor_age_minutes: float | None = None
+    if fetched_at_utc and anchor_last_update_utc:
+        try:
+            fetched = datetime.fromisoformat(fetched_at_utc.replace("Z", "+00:00")).astimezone(timezone.utc)
+            lu = datetime.fromisoformat(anchor_last_update_utc.replace("Z", "+00:00")).astimezone(timezone.utc)
+            anchor_age_minutes = (fetched - lu).total_seconds() / 60.0
+        except Exception:
+            pass
 
     # 1. 找 sharp 锚
     anchor = next((b for b in sharp_books if b in market_data), None)
@@ -263,6 +303,19 @@ def scan_market(board: dict[str, dict[str, dict[str, float]]],
     if not anchor_outcomes:
         return {"status": "no_anchor_outcomes", "quotes": [], "edges": [], "quotes_scanned": 0}
 
+    # ── FIX-1: 锚腿超龄 → stale_anchor, 抑制 fair_probs ──
+    if anchor_age_minutes is not None and anchor_age_minutes > max_leg_age_min:
+        return {
+            "status": "stale_anchor",
+            "sharp_anchor": anchor,
+            "anchor_last_update_utc": anchor_last_update_utc,
+            "anchor_age_minutes": round(anchor_age_minutes, 1),
+            "max_leg_age_min": max_leg_age_min,
+            "market": market_key,
+            "quotes": [], "edges": [], "quotes_scanned": 0,
+            "note": f"Pinnacle {market_key} last updated {anchor_age_minutes:.0f}m ago (> {max_leg_age_min:.0f}m threshold)",
+        }
+
     # 2. sharp 去 vig
     sharp_odds = [market_data[anchor][o] for o in anchor_outcomes]
     fair: dict[str, list[float]] = {}
@@ -271,15 +324,32 @@ def scan_market(board: dict[str, dict[str, dict[str, float]]],
 
     sharp_overround = sum(1.0 / o for o in sharp_odds) - 1.0
 
+    # ── 水位 sanity: 负水位或 >12% → 拒 (M004 防护) ──
+    # spreads 每条 line 只有一个 outcome（对方在反 point），overround 无意义
+    if market_key != "spreads":
+        if sharp_overround < 0 or sharp_overround > 0.12:
+            return {
+                "status": "bad_anchor_water",
+                "sharp_anchor": anchor,
+                "sharp_overround": round(sharp_overround, 4),
+                "anchor_last_update_utc": anchor_last_update_utc,
+                "anchor_age_minutes": round(anchor_age_minutes, 1) if anchor_age_minutes is not None else None,
+                "market": market_key,
+                "quotes": [], "edges": [], "quotes_scanned": 0,
+                "note": f"Pinnacle {market_key} overround={sharp_overround:.4f} outside sane range",
+            }
+
     # 3. 扫非锚 book
     quotes: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
+    books_that_participated: set[str] = set()
     for book, prices in market_data.items():
-        if book == anchor:
+        if book == anchor or book == "_anchor_meta":
             continue
         for o in anchor_outcomes:
             if o not in prices:
                 continue
+            books_that_participated.add(book)
             offered = prices[o]
 
             outcome_index = anchor_outcomes.index(o)
@@ -318,16 +388,23 @@ def scan_market(board: dict[str, dict[str, dict[str, float]]],
     noise_edge_count = sum(1 for edge in edges if edge.get("ev_band") == "noise_lt_5pp")
     actionable_count = sum(1 for edge in edges if edge.get("actionable") is True)
 
+    # ── FIX-2: 无对手报价时降级 ──
+    status = "ok"
+    if len(quotes) == 0:
+        status = "anchor_only_no_comparables"
+
     return {
-        "status": "ok",
+        "status": status,
         "sharp_anchor": anchor,
         "sharp_overround": round(sharp_overround, 4),
+        "anchor_last_update_utc": anchor_last_update_utc,
+        "anchor_age_minutes": round(anchor_age_minutes, 1) if anchor_age_minutes is not None else None,
         "market": market_key,
         "devig_primary": primary,
         "edge_threshold": edge_threshold,
         "actionable_threshold": actionable_threshold,
         "suspect_threshold": suspect_threshold,
-        "books_scanned": len(market_data),
+        "books_scanned": len(books_that_participated) + 1,  # +1 for Pinnacle
         "outcomes_scanned": anchor_outcomes,
         "quotes_scanned": len(quotes),
         "edge_count": len(edges),
@@ -353,15 +430,31 @@ def build_summary(results: dict[str, Any]) -> dict[str, Any]:
     for market_result in results.get("markets", {}).values():
         if not isinstance(market_result, dict):
             continue
-        quotes_scanned += int(market_result.get("quotes_scanned") or 0)
-        for edge in market_result.get("edges", []):
-            if not isinstance(edge, dict):
-                continue
-            all_edges.append(edge)
-            if edge.get("ev_band") == "noise_lt_5pp":
-                noise_edges.append(edge)
-            if edge.get("actionable") is True or edge.get("qualifies") is True:
-                actionable_edges.append(edge)
+        # h2h: flat structure with direct "edges"
+        if "edges" in market_result:
+            quotes_scanned += int(market_result.get("quotes_scanned") or 0)
+            for edge in market_result.get("edges", []):
+                if not isinstance(edge, dict):
+                    continue
+                all_edges.append(edge)
+                if edge.get("ev_band") == "noise_lt_5pp":
+                    noise_edges.append(edge)
+                if edge.get("actionable") is True or edge.get("qualifies") is True:
+                    actionable_edges.append(edge)
+        # spreads/totals (FIX-3): nested under line_groups
+        if "line_groups" in market_result:
+            for line_result in market_result["line_groups"].values():
+                if not isinstance(line_result, dict):
+                    continue
+                quotes_scanned += int(line_result.get("quotes_scanned") or 0)
+                for edge in line_result.get("edges", []):
+                    if not isinstance(edge, dict):
+                        continue
+                    all_edges.append(edge)
+                    if edge.get("ev_band") == "noise_lt_5pp":
+                        noise_edges.append(edge)
+                    if edge.get("actionable") is True or edge.get("qualifies") is True:
+                        actionable_edges.append(edge)
 
     best_edge = max(all_edges, key=lambda e: e.get("ev_shin", -999), default=None)
     best_noise = max(noise_edges, key=lambda e: e.get("ev_shin", -999), default=None)
@@ -400,10 +493,12 @@ def main() -> int:
                         help=f"EV above this is suspect (default: {SUSPECT_THRESHOLD})")
     args = parser.parse_args()
 
-    # Parse snapshot
-    board = parse_odds_snapshot(args.input_snapshot,
-                                match_home=args.match_home,
-                                match_away=args.match_away)
+    # Parse snapshot — new format: {"board": ..., "fetched_at_utc": ..., "snapshot_path": ...}
+    parsed = parse_odds_snapshot(args.input_snapshot,
+                                 match_home=args.match_home,
+                                 match_away=args.match_away)
+    board = parsed["board"]
+    fetched_at_utc = parsed.get("fetched_at_utc")
 
     # Scan each market
     results: dict[str, Any] = {
@@ -417,11 +512,19 @@ def main() -> int:
         "source_snapshot_id": Path(args.input_snapshot).name,
         "match_home": args.match_home,
         "match_away": args.match_away,
+        "fetched_at_utc": fetched_at_utc,
         "edge_threshold": args.edge_threshold,
         "actionable_threshold": args.actionable_threshold,
         "suspect_threshold": args.suspect_threshold,
         "markets": {},
     }
+
+    SCAN_KWARGS = dict(
+        edge_threshold=args.edge_threshold,
+        actionable_threshold=args.actionable_threshold,
+        suspect_threshold=args.suspect_threshold,
+        fetched_at_utc=fetched_at_utc,
+    )
 
     # h2h — outcomes are team names from snapshot, not "home/draw/away"
     h2h_board = board.get("h2h", {})
@@ -429,45 +532,73 @@ def main() -> int:
         # Collect all unique outcome names from the h2h board
         h2h_outcomes: list[str] = []
         for bm_prices in h2h_board.values():
-            for outcome_name in bm_prices:
+            if not isinstance(bm_prices, dict):
+                continue
+            for outcome_name, value in bm_prices.items():
+                if outcome_name.startswith("_"):
+                    continue
+                if not isinstance(value, (int, float)):
+                    continue
                 if outcome_name not in h2h_outcomes:
                     h2h_outcomes.append(outcome_name)
         if h2h_outcomes:
-            h2h_result = scan_market(board, "h2h", h2h_outcomes,
-                                     edge_threshold=args.edge_threshold,
-                                     actionable_threshold=args.actionable_threshold,
-                                     suspect_threshold=args.suspect_threshold)
+            h2h_result = scan_market(board, "h2h", h2h_outcomes, **SCAN_KWARGS)
             results["markets"]["h2h"] = h2h_result
 
-    # spreads (AH) — outcomes are labels like "mexico@-1.25"
-    spreads_board = board.get("spreads", {})
-    if spreads_board:
-        all_outcomes: list[str] = []
-        for bm_prices in spreads_board.values():
-            for label in bm_prices:
-                if label not in all_outcomes:
-                    all_outcomes.append(label)
-        if all_outcomes:
-            spread_result = scan_market(board, "spreads", all_outcomes,
-                                        edge_threshold=args.edge_threshold,
-                                        actionable_threshold=args.actionable_threshold,
-                                        suspect_threshold=args.suspect_threshold)
-            results["markets"]["spreads"] = spread_result
+    # ── FIX-3: spreads/totals 按 @line 分组, 每条线独立两元去水 ──
+    for mkey in ("spreads", "totals"):
+        mk_board = board.get(mkey, {})
+        if not mk_board:
+            continue
 
-    # totals — same approach
-    totals_board = board.get("totals", {})
-    if totals_board:
-        all_outcomes = []
-        for bm_prices in totals_board.values():
-            for label in bm_prices:
-                if label not in all_outcomes:
-                    all_outcomes.append(label)
-        if all_outcomes:
-            totals_result = scan_market(board, "totals", all_outcomes,
-                                        edge_threshold=args.edge_threshold,
-                                        actionable_threshold=args.actionable_threshold,
-                                        suspect_threshold=args.suspect_threshold)
-            results["markets"]["totals"] = totals_result
+        # 提前提取 anchor_meta, 避免多线 scan_market 时丢失
+        m_anchor_meta = {}
+        if isinstance(mk_board, dict):
+            raw = mk_board.get("_anchor_meta")
+            if isinstance(raw, dict):
+                m_anchor_meta = dict(raw)
+
+        # Collect all unique outcome labels across all books
+        all_labels: list[str] = []
+        for bm_prices in mk_board.values():
+            if not isinstance(bm_prices, dict):
+                continue
+            for label, value in bm_prices.items():
+                if label.startswith("_"):
+                    continue
+                if not isinstance(value, (int, float)):
+                    continue  # skip non-pricing keys (e.g. "last_update_utc" in _anchor_meta)
+                if label not in all_labels:
+                    all_labels.append(label)
+        if not all_labels:
+            continue
+
+        # Group by @line suffix
+        groups: dict[str, list[str]] = {}
+        for lbl in all_labels:
+            line_part = lbl.split("@", 1)[1] if "@" in lbl else "none"
+            groups.setdefault(line_part, []).append(lbl)
+
+        results["markets"][mkey] = {"line_groups": {}, "edge_count": 0, "quotes_scanned": 0}
+        for line_key, line_outcomes in groups.items():
+            line_result = scan_market(board, mkey, line_outcomes,
+                                      anchor_meta=m_anchor_meta, **SCAN_KWARGS)
+            results["markets"][mkey]["line_groups"][line_key] = line_result
+            # Aggregate counts
+            results["markets"][mkey]["edge_count"] += line_result.get("edge_count", 0)
+            results["markets"][mkey]["quotes_scanned"] += line_result.get("quotes_scanned", 0)
+        # Summary for the market — only consider non-trivial line groups
+        statuses = [g.get("status", "unknown") for g in results["markets"][mkey]["line_groups"].values()]
+        relevant_statuses = [s for s in statuses if s not in ("no_anchor_outcomes", "no_market_data", "no_sharp_anchor")]
+        if not relevant_statuses:
+            results["markets"][mkey]["status"] = "ok"
+        elif all(s == "ok" for s in relevant_statuses):
+            results["markets"][mkey]["status"] = "ok"
+        else:
+            results["markets"][mkey]["status"] = max(
+                relevant_statuses,
+                key=lambda s: {"ok": 0, "anchor_only_no_comparables": 1, "bad_anchor_water": 2, "stale_anchor": 2}.get(s, 99)
+            )
 
     results["summary"] = build_summary(results)
 
