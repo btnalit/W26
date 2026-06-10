@@ -920,27 +920,47 @@ def postmatch_grade() -> int:
                                 # Compute closing no-vig (shin)
                                 close_nv = DEVIG.devig_shin(close_prices)
                                 close_nv_by_name = dict(zip(close_names, close_nv))
-                                # The first outcome name is typically the home team name
-                                home_outcome_name = close_names[0]
+                                # Match home team by name, not by index.
+                                # the-odds-api outcome order is not guaranteed;
+                                # only the fixture's home team name is authoritative.
+                                home_team = (home or "").strip().lower()
+                                home_outcome_name = None
+                                for cname in close_names:
+                                    if cname.strip().lower() == home_team:
+                                        home_outcome_name = cname
+                                        break
+                                if not home_outcome_name:
+                                    # Fallback: the-odds-api always puts hoem first in practice
+                                    home_outcome_name = close_names[0]
                                 # Prefer artifact JSON for entry data, fall back to regex
                                 entry_odds = None
                                 entry_nv = None
                                 entry_src = "regex"
-                                # First: try manifest artifact (devig artifact has 1X2 no_vig)
+                                # First: try manifest artifact
+                                # Real devig artifact schema: decimal_odds[], no_vig_probabilities[]
+                                # (parallel lists, no no_vig dict or markets.1x2.prices)
                                 for art in report_manifest.get("artifacts", []):
                                     if not isinstance(art, dict):
                                         continue
                                     if "devig_1x2" in artifact_caps(art):
                                         art_payload = load_artifact_payload(art, report_manifest_path)
                                         if isinstance(art_payload, dict):
-                                            nv = art_payload.get("no_vig") if isinstance(art_payload.get("no_vig"), dict) else {}
-                                            markets_1x2 = art_payload.get("markets", {}).get("1x2") if isinstance(art_payload.get("markets"), dict) else None
-                                            if isinstance(markets_1x2, dict):
-                                                prices = markets_1x2.get("prices") if isinstance(markets_1x2.get("prices"), list) else []
-                                                odds_by_name = {str(p.get("name", "")): p.get("price", 0) for p in prices if isinstance(p, dict)}
-                                                entry_odds = odds_by_name.get(home_outcome_name)
-                                                entry_nv = nv.get(home_outcome_name)
-                                                entry_src = "artifact"
+                                            art_odds = art_payload.get("decimal_odds")
+                                            art_nv = art_payload.get("no_vig_probabilities")
+                                            if isinstance(art_odds, list) and isinstance(art_nv, list) and len(art_odds) >= 3 and len(art_nv) >= 3:
+                                                # Match home outcome by name from the API order
+                                                close_oc_list = list(close_by_name.keys())
+                                                for idx, cname in enumerate(close_oc_list):
+                                                    if cname == home_outcome_name and idx < len(art_odds) and idx < len(art_nv):
+                                                        entry_odds = art_odds[idx]
+                                                        entry_nv = art_nv[idx]
+                                                        entry_src = "artifact"
+                                                        break
+                                                if entry_odds is None:
+                                                    # If no name match, use same index as home (positional fallback)
+                                                    entry_odds = art_odds[0]
+                                                    entry_nv = art_nv[0]
+                                                    entry_src = "artifact"
                                                 break
                                 # Fallback: regex from report text
                                 if entry_odds is None:
@@ -954,14 +974,14 @@ def postmatch_grade() -> int:
                                         entry_src = "regex"
                                 # Compute CLV = entry_odds × closing_fair_prob − 1
                                 if entry_odds is not None and entry_odds > 0:
-                                    closing_fair_prob = close_nv_by_name.get(home_outcome_name)
+                                    closing_fair_prob = close_nv_by_name.get(home_outcome_name or close_names[0])
                                     if closing_fair_prob is not None and closing_fair_prob > 0:
                                         clv = round(entry_odds * closing_fair_prob - 1, 4)
                                         clv_detail = {
                                             "entry_odds": entry_odds,
                                             "entry_no_vig": entry_nv,
                                             "closing_no_vig": closing_fair_prob,
-                                            "closing_outcome": home_outcome_name,
+                                            "closing_outcome": home_outcome_name or close_names[0],
                                             "clv_raw": clv,
                                             "entry_src": entry_src,
                                         }

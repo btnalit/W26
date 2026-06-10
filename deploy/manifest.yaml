@@ -8,42 +8,20 @@ profile:
   targets:
     - dest: "/wc26-profile/wc26_cron_payload.py"
       from: "profile/scripts/wc26_cron_payload.py"
-    - dest: "/wc26-profile/report_contract.py"
-      from: "profile/scripts/wc26_cron_payload.py"  # NOTE: production uses profile-level version
 
 skill_scripts:
   description: "Odds-analysis skill scripts — imported by cron payload via load_module()"
   source: "profile/skills/odds-analysis/scripts/"
   dest_dir: "/skills/odds-analysis/scripts/"
-  files:
-    - blocked_recovery.py
-    - calibration_gate.py
-    - consistency_triangle.py
-    - cross_book_scan.py
-    - deep_research_contract.py
-    - devig.py
-    - direct_report_bind.py
-    - direct_request_record.py
-    - direct_summary.py
-    - fixture_registry.py
-    - mechanism_audit.py
-    - model_margin.py
-    - numeric_artifact.py
-    - opportunity_watch.py
-    - report_contract.py
-    - report_guard.py
-    - rich_summary.py
-    - role_engine.py
-    - snapshot_resolver.py
-    - verify_keys.py
-    - wc26_match_pipeline.py
+  canonical_only: true
+  note: "deploy.sh copies from canonical (skills/), NOT from workspace shim"
 
 shared_scripts:
-  description: "Shared scripts — importable from PYTHONPATH"
-  source: "workspace/scripts/"
+  description: "Shared scripts — deployed from canonical path only"
+  canonical_source: "profile/skills/odds-analysis/scripts/"
   targets:
     - dest: "/hermesdata/worldcup-2026-handicap/scripts/cross_book_scan.py"
-      from: "workspace/scripts/cross_book_scan.py"
+      note: "deployed from canonical skill version; workspace/scripts/cross_book_scan.py is a shim that imports canonical"
 
 init_files:
   description: "__init__.py files for package imports"
@@ -52,3 +30,17 @@ init_files:
       content: "# Hermes shared scripts package\n"
     - dest: "/skills/odds-analysis/scripts/__init__.py"
       content: "# WC26 skill scripts package\n"
+
+audit_trail:
+  description: "Deploy audit"
+  backup_dir: "/wc26-backup/<timestamp>/"
+  log_file: "/wc26-backup/DEPLOYED_SHA"
+  fields:
+    - deployed_at_utc
+    - commit_sha
+    - repo_root
+
+pre_push_hook:
+  description: "CI gate — installed by: cp deploy/pre-push .git/hooks/pre-push && chmod +x"
+  file: "deploy/pre-push"
+  tests: "97 total (92 existing + 5 CLV math)"

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Pre-push hook: run full test suite before allowing push.
+# Installed by: cp deploy/pre-push .git/hooks/pre-push && chmod +x .git/hooks/pre-push
+
+set -euo pipefail
+
+echo "==> pre-push: running tests..."
+cd "$(git rev-parse --show-toplevel)"
+
+python3 -m pytest profile/tests/ -q --tb=short 2>&1
+echo "==> pre-push: all tests passed"
