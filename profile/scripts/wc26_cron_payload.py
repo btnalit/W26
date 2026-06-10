@@ -691,6 +691,7 @@ def odds_broad_scan() -> int:
         # ── Validate snapshot quality before any downstream consumer sees it ──
         validator = SCRIPT_DIR / "snapshot_validator.py"
         health_dir = WORKSPACE / "snapshots" / "health"
+        health_dir.mkdir(parents=True, exist_ok=True)
         health_path = health_dir / f"{path.stem}.health.json"
         try:
             vret = subprocess.run(
@@ -751,6 +752,7 @@ def oddspapi_ah_snapshot() -> int:
         # ── Validate snapshot quality ──
         validator = SCRIPT_DIR / "snapshot_validator.py"
         health_dir = WORKSPACE / "snapshots" / "health"
+        health_dir.mkdir(parents=True, exist_ok=True)
         health_path = health_dir / f"{path.stem}.health.json"
         try:
             vret = subprocess.run(
