@@ -602,14 +602,27 @@ def fixture_collect() -> int:
     token = os.environ.get("FOOTBALL_DATA_TOKEN")
     if not token:
         return emit(manifest("wc26-fixture-collect", "blocked", reason="FOOTBALL_DATA_TOKEN missing", exit_code=1))
-    try:
-        response = requests.get(
-            "https://api.football-data.org/v4/competitions/WC/matches",
-            headers={"X-Auth-Token": token},
-            timeout=30,
-        )
-    except requests.RequestException as exc:
-        return emit(manifest("wc26-fixture-collect", "fail", error=str(exc)[:240], exit_code=1))
+
+    # ── 重试 3 次，指数退避：内部代理到 football-data.org 的 SSL 握手间歇性超时 ──
+    import time as _time
+    last_exc: Exception | None = None
+    response = None
+    for attempt in range(3):
+        try:
+            response = requests.get(
+                "https://api.football-data.org/v4/competitions/WC/matches",
+                headers={"X-Auth-Token": token},
+                timeout=30,
+            )
+            last_exc = None
+            break  # connection succeeded, exit retry loop
+        except requests.RequestException as exc:
+            last_exc = exc
+            if attempt < 2:  # don't sleep on last attempt
+                wait = 2 ** attempt * 5  # 5s, 10s
+                _time.sleep(wait)
+    if last_exc is not None:
+        return emit(manifest("wc26-fixture-collect", "fail", error=str(last_exc)[:240], exit_code=1))
     payload = manifest(
         "wc26-fixture-collect",
         "ok" if response.status_code == 200 else "fail",
