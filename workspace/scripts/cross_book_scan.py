@@ -258,13 +258,17 @@ def _scan_spreads(
             fair_shin = DEVIG_METHODS["shin"](odds_pair)
             fair_power = DEVIG_METHODS["power"](odds_pair)
             fair_mult = DEVIG_METHODS["multiplicative"](odds_pair)
-        except Exception:
+        except Exception as exc:
+            import sys
+            print(f"WARN: cross_book_scan devig failed for {sharp_key} spread {point}/{outcome_name}: {exc}", file=sys.stderr)
             continue
         # Find this outcome's index in the pair
         pair_names = list(sharp_spreads.keys())
         try:
             idx = pair_names.index(outcome_name)
-        except ValueError:
+        except ValueError as exc:
+            import sys
+            print(f"WARN: cross_book_scan outcome {outcome_name} not in spread pair for {sharp_key}: {exc}", file=sys.stderr)
             continue
         p_shin = fair_shin[idx]
         p_power = fair_power[idx]

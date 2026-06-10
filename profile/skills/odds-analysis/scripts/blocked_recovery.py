@@ -732,8 +732,8 @@ def try_generate_path_c_artifact(
                 payload["recovery_generated_at_utc"] = utc_now()
                 payload["recovery_input_manifest_path"] = str(manifest_path)
                 artifact_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        except Exception:
-            pass
+        except Exception as exc:
+            return None, f"failed to stamp recovery metadata on artifact: {exc}"
     return entry, "generated path_c_consistency"
 
 
@@ -1418,7 +1418,8 @@ def data_precondition_check(match_id: str, registry: dict[str, Any] | None = Non
                 home_n = _normalized_text(entry.get("home", ""))
                 away_n = _normalized_text(entry.get("away", ""))
                 for t in teams:
-                    if home_n and _normalized_text(t) == home_n:
+                    t_norm = _normalized_text(t)
+                    if (home_n and t_norm == home_n) or (away_n and t_norm == away_n):
                         snapshot_has_match = True
                         bk = item.get("bookmakers", [])
                         if bk:

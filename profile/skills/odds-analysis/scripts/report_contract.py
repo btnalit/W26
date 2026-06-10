@@ -370,38 +370,26 @@ def _artifact_capabilities(
     provides = artifact.get("provides", [])
     if not isinstance(provides, list):
         provides = []
-    raw_parts = [
-        str(artifact.get("artifact_type", "")),
-        str(artifact.get("script", "")),
-        str(artifact.get("path", "")),
-        " ".join(str(item) for item in provides),
-    ]
-    if artifact_payload:
-        raw_parts.extend(
-            [
-                str(artifact_payload.get("artifact_kind", "")),
-                str(artifact_payload.get("artifact_type", "")),
-                str(artifact_payload.get("script", "")),
-                " ".join(str(item) for item in artifact_payload.get("provides", []) if isinstance(artifact_payload.get("provides", []), list)),
-            ]
-        )
-    raw = " ".join(raw_parts).lower()
+    # provides is the ONLY authoritative source for capability inference.
+    # Path/script/artifact_type substring matching is prohibited because it
+    # produces false positives (e.g. a path containing '-ah-' or 'cross_book').
     caps: set[str] = set()
-
-    if "no_vig" in raw or "scalar_market" in raw or ("devig" in raw and "1x2" in raw):
-        caps.add("devig_1x2")
-    if "cross_book" in raw or "crossbook" in raw:
-        caps.add("path_a_crossbook")
-    if "asian_handicap" in raw or " ah" in raw or "-ah-" in raw:
-        caps.add("asian_handicap")
-    if "totals" in raw or "over_under" in raw or "total_goals" in raw:
-        caps.add("totals")
-    if "consistency_triangle" in raw or "path_c" in raw:
-        caps.add("path_c_consistency")
-    if "mechanism_audit" in raw or "mechanism audit" in raw:
-        caps.add("mechanism_audit")
-    if "role_engine" in raw:
-        caps.add("role_engine")
+    for item in provides:
+        item_s = str(item).strip()
+        if item_s in ("devig_1x2", "path_a_crossbook", "asian_handicap",
+                       "totals", "path_c_consistency", "mechanism_audit",
+                       "role_engine"):
+            caps.add(item_s)
+    # Also check artifact_payload's own provides list if present
+    if artifact_payload:
+        payload_provides = artifact_payload.get("provides", [])
+        if isinstance(payload_provides, list):
+            for item in payload_provides:
+                item_s = str(item).strip()
+                if item_s in ("devig_1x2", "path_a_crossbook", "asian_handicap",
+                               "totals", "path_c_consistency", "mechanism_audit",
+                               "role_engine"):
+                    caps.add(item_s)
     return caps
 
 

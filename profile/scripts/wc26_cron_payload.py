@@ -897,20 +897,53 @@ def postmatch_grade() -> int:
         # --- CLV from closing odds ---
         clv = None
         clv_detail = {}
-        close_odds = closing_odds.get(match_key, {})
-        if close_odds:
+        close_odds_raw = closing_odds.get(match_key, {})
+        if close_odds_raw:
             # Find Pinnacle closing h2h
-            for bk in close_odds.get("bookmakers", []):
+            for bk in close_odds_raw.get("bookmakers", []):
                 if bk.get("key") == "pinnacle":
                     for mk in bk.get("markets", []):
                         if mk.get("key") in ("h2h", "1x2"):
                             outcomes = mk.get("outcomes", [])
                             if len(outcomes) >= 3:
-                                close_prices = [o.get("price", 0) for o in outcomes]
-                                if all(p > 0 for p in close_prices):
-                                    # Compute closing no-vig (shin)
-                                    close_nv = DEVIG.devig_shin(close_prices)
-                                    # Compare with market board entry no-vig
+                                # Build name→price mapping (alignment by outcome name, not index)
+                                close_by_name = {}
+                                for oc in outcomes:
+                                    name = str(oc.get("name", "")).strip()
+                                    price = oc.get("price", 0)
+                                    if name and price > 0:
+                                        close_by_name[name] = price
+                                if len(close_by_name) < 3:
+                                    break
+                                close_prices = list(close_by_name.values())
+                                close_names = list(close_by_name.keys())
+                                # Compute closing no-vig (shin)
+                                close_nv = DEVIG.devig_shin(close_prices)
+                                close_nv_by_name = dict(zip(close_names, close_nv))
+                                # The first outcome name is typically the home team name
+                                home_outcome_name = close_names[0]
+                                # Prefer artifact JSON for entry data, fall back to regex
+                                entry_odds = None
+                                entry_nv = None
+                                entry_src = "regex"
+                                # First: try manifest artifact (devig artifact has 1X2 no_vig)
+                                for art in report_manifest.get("artifacts", []):
+                                    if not isinstance(art, dict):
+                                        continue
+                                    if "devig_1x2" in artifact_caps(art):
+                                        art_payload = load_artifact_payload(art, report_manifest_path)
+                                        if isinstance(art_payload, dict):
+                                            nv = art_payload.get("no_vig") if isinstance(art_payload.get("no_vig"), dict) else {}
+                                            markets_1x2 = art_payload.get("markets", {}).get("1x2") if isinstance(art_payload.get("markets"), dict) else None
+                                            if isinstance(markets_1x2, dict):
+                                                prices = markets_1x2.get("prices") if isinstance(markets_1x2.get("prices"), list) else []
+                                                odds_by_name = {str(p.get("name", "")): p.get("price", 0) for p in prices if isinstance(p, dict)}
+                                                entry_odds = odds_by_name.get(home_outcome_name)
+                                                entry_nv = nv.get(home_outcome_name)
+                                                entry_src = "artifact"
+                                                break
+                                # Fallback: regex from report text
+                                if entry_odds is None:
                                     entry_market = re.search(
                                         r"\| 1X2 H [^|]+ \| [^|]+ \| decimal \| ([\d.]+) [^|]+ [^|]+ [^|]+ ([\d.]+)",
                                         text
@@ -918,11 +951,19 @@ def postmatch_grade() -> int:
                                     if entry_market:
                                         entry_odds = float(entry_market.group(1))
                                         entry_nv = float(entry_market.group(2))
-                                        clv = round(entry_nv - close_nv[0], 4)
+                                        entry_src = "regex"
+                                # Compute CLV = entry_odds × closing_fair_prob − 1
+                                if entry_odds is not None and entry_odds > 0:
+                                    closing_fair_prob = close_nv_by_name.get(home_outcome_name)
+                                    if closing_fair_prob is not None and closing_fair_prob > 0:
+                                        clv = round(entry_odds * closing_fair_prob - 1, 4)
                                         clv_detail = {
+                                            "entry_odds": entry_odds,
                                             "entry_no_vig": entry_nv,
-                                            "closing_no_vig": close_nv[0],
+                                            "closing_no_vig": closing_fair_prob,
+                                            "closing_outcome": home_outcome_name,
                                             "clv_raw": clv,
+                                            "entry_src": entry_src,
                                         }
                                     break
 

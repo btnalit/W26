@@ -125,9 +125,13 @@ def iter_candidates(workspace: Path, source: str) -> list[SnapshotCandidate]:
             seen.add(path)
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
+            except Exception as exc:
+                import sys
+                print(f"WARN: corrupted snapshot skipped: {path} — {exc}", file=sys.stderr)
                 continue
             if not isinstance(payload, dict):
+                import sys
+                print(f"WARN: non-dict snapshot skipped: {path}", file=sys.stderr)
                 continue
             captured = captured_at(payload, path)
             if captured is None:

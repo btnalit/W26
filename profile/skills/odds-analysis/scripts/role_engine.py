@@ -218,7 +218,9 @@ def crossbook_h2h_probs(crossbook: dict[str, Any], home: str, away: str) -> dict
             continue
         try:
             mapped[side] = float(value)
-        except Exception:
+        except Exception as exc:
+            import sys
+            print(f"WARN: role_engine ignoring non-float value for {side}: {exc}", file=sys.stderr)
             continue
     return mapped
 
@@ -230,8 +232,9 @@ def model_probs(artifacts: dict[str, tuple[dict[str, Any], dict[str, Any] | None
     for key in ("home", "draw", "away"):
         try:
             result[key] = float(raw[key])
-        except Exception:
-            pass
+        except Exception as exc:
+            import sys
+            print(f"WARN: role_engine.model_probs missing/non-float for {key}: {exc}", file=sys.stderr)
     return result
 
 
