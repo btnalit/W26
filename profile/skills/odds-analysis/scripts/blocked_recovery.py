@@ -51,6 +51,7 @@ PRIORITY = [
     "missing_guarded_report",
     "missing_artifact",
     "opportunity_block",
+    "unclassified",
 ]
 
 TERMINAL_CATEGORIES = {
@@ -61,6 +62,7 @@ TERMINAL_CATEGORIES = {
     "credential_block",
     "detector_bug",
     "opportunity_block",
+    "unclassified",
 }
 
 
@@ -213,16 +215,16 @@ def classify_event(event: dict[str, Any]) -> dict[str, Any]:
                 candidates.add("missing_source")
 
     if not candidates:
-        candidates.add("missing_artifact")
+        candidates.add("unclassified")
 
     for category in PRIORITY:
         if category in candidates:
             return {
                 "category": category,
                 "candidates": sorted(candidates),
-                "auto_recoverable": category in {"missing_artifact", "missing_guarded_report", "stale_snapshot"},
+                "auto_recoverable": category not in TERMINAL_CATEGORIES,
             }
-    return {"category": "missing_artifact", "candidates": sorted(candidates), "auto_recoverable": True}
+    return {"category": "unclassified", "candidates": sorted(candidates), "auto_recoverable": False}
 
 
 def resolve_path(raw: Any, base: Path | None = None) -> Path | None:
@@ -699,53 +701,39 @@ def try_generate_path_c_artifact(
         [
             python_bin(),
             str(SCRIPTS_DIR / "consistency_triangle.py"),
-            "--snapshot",
-            str(snapshot_path),
-            "--match",
-            f"{home} vs {away}",
-            "--full",
+            "--manifest",
+            str(manifest_path),
         ],
         timeout=120,
     )
     if result.returncode != 0:
-        return None, (result.stderr or result.stdout or "consistency_triangle failed").strip()[:500]
+        return None, (result.stderr or result.stdout or "path_c generation via --manifest failed").strip()[:500]
     raw_output = (result.stdout or "").strip()
     if not raw_output:
-        return None, "consistency_triangle produced no output"
+        return None, "consistency_triangle.py --manifest produced no output"
     try:
         parsed = json.loads(raw_output)
     except json.JSONDecodeError as exc:
-        return None, f"consistency_triangle output is not JSON: {exc}"
-    payload = select_consistency_payload(parsed, home, away)
-    if not payload:
-        return None, "no matching consistency payload"
-
-    path = ARTIFACTS_DIR / f"consistency-{match_id}-{timestamp}-recovery.json"
-    payload = dict(payload)
-    payload.setdefault("artifact_id", f"consistency-triangle-{match_id}-legacy-recovered-{timestamp}")
-    payload["artifact_type"] = "consistency_triangle"
-    payload["artifact_kind"] = "consistency_triangle"
-    payload["script"] = "consistency_triangle.py"
-    payload["provides"] = ["path_c_consistency"]
-    payload["snapshot_id"] = str(snapshot_id or snapshot_path.name)
-    payload["snapshot_path"] = str(snapshot_path)
-    payload["match_id"] = match_id
-    payload["status"] = "signal" if (payload.get("signal") or {}).get("type") else "no_signal"
-    payload["generated_by"] = "blocked_recovery"
-    payload["recovery_id"] = recovery_id
-    payload["recovery_action"] = "generate_path_c_consistency"
-    payload["recovery_generated_at_utc"] = utc_now()
-    payload["recovery_input_manifest_path"] = str(manifest_path)
-    write_json(path, payload)
-    entry = {
-        "artifact_id": payload["artifact_id"],
-        "artifact_type": "consistency_triangle",
-        "script": "consistency_triangle.py",
-        "path": str(path),
-        "source_snapshot_id": str(snapshot_id or snapshot_path.name),
-        "provides": ["path_c_consistency"],
-        "status": payload["status"],
-    }
+        return None, f"consistency_triangle.py --manifest output is not JSON: {exc}"
+    if not parsed.get("ok"):
+        return None, parsed.get("error") or "consistency_triangle.py --manifest returned not ok"
+    entry = parsed.get("artifact_entry")
+    if not isinstance(entry, dict):
+        return None, "consistency_triangle.py --manifest returned no artifact_entry"
+    # Stamp recovery metadata on the artifact payload (read it back, stamp, rewrite)
+    artifact_path = Path(str(entry.get("path") or ""))
+    if artifact_path.exists():
+        try:
+            payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                payload["generated_by"] = "blocked_recovery"
+                payload["recovery_id"] = recovery_id
+                payload["recovery_action"] = "generate_path_c_consistency"
+                payload["recovery_generated_at_utc"] = utc_now()
+                payload["recovery_input_manifest_path"] = str(manifest_path)
+                artifact_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
     return entry, "generated path_c_consistency"
 
 
@@ -1398,15 +1386,176 @@ def terminal_result(category: str, classification: dict[str, Any]) -> dict[str, 
     return {"status": "manual_required", "reason": f"{category} is not auto-recoverable"}
 
 
+def data_precondition_check(match_id: str, registry: dict[str, Any] | None = None) -> dict[str, Any]:
+    """(b) Data precondition: fixture exists + odds snapshot available.
+    
+    Returns {'ok': True} or {'ok': False, 'reason': '...'} with honest reason.
+    """
+    if not re.fullmatch(r"M\d{3}", match_id or ""):
+        return {"ok": False, "reason": f"invalid match_id: {match_id!r}"}
+    reg = registry if isinstance(registry, dict) else load_fixture_registry()
+    entry = reg.get("by_local_id", {}).get(match_id) if isinstance(reg.get("by_local_id"), dict) else None
+    if not entry:
+        return {"ok": False, "reason": f"fixture {match_id} not found in registry — no fixture data available"}
+    for key in ("home", "away", "kickoff_utc"):
+        if not entry.get(key):
+            return {"ok": False, "reason": f"fixture {match_id} missing {key}"}
+    # Check for any odds snapshot (the-odds-api or oddspapi)
+    odds_dir = WORKSPACE / "snapshots" / "odds"
+    if not odds_dir.exists() or not any(odds_dir.iterdir()):
+        return {"ok": False, "reason": f"no odds snapshots exist at all — data collection may not have started for {match_id}"}
+    # Check if the match has odds data in recent snapshots
+    snapshot_has_match = False
+    snapshot_only_h2h = False
+    for snap in sorted(odds_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:5]:
+        try:
+            payload = json.loads(snap.read_text(encoding="utf-8"))
+            entries = payload.get("data", []) if isinstance(payload, dict) else payload
+            if not isinstance(entries, list):
+                continue
+            for item in entries:
+                teams = item.get("teams", []) if isinstance(item, dict) else []
+                home_n = _normalized_text(entry.get("home", ""))
+                away_n = _normalized_text(entry.get("away", ""))
+                for t in teams:
+                    if home_n and _normalized_text(t) == home_n:
+                        snapshot_has_match = True
+                        bk = item.get("bookmakers", [])
+                        if bk:
+                            has_ah = any(
+                                isinstance(m, dict) and "spreads" in str(m.get("key", ""))
+                                for b in bk if isinstance(b, dict)
+                                for m in (b.get("markets", []) if isinstance(b.get("markets"), list) else [])
+                            )
+                            has_totals = any(
+                                isinstance(m, dict) and "totals" in str(m.get("key", ""))
+                                for b in bk if isinstance(b, dict)
+                                for m in (b.get("markets", []) if isinstance(b.get("markets"), list) else [])
+                            )
+                            snapshot_only_h2h = not has_ah and not has_totals
+                        break
+                if snapshot_has_match:
+                    break
+        except Exception:
+            continue
+        if snapshot_has_match:
+            break
+    if not snapshot_has_match:
+        return {
+            "ok": False,
+            "defer": True,
+            "reason": f"odds snapshot exists but has no data for {match_id} ({entry.get('home')} vs {entry.get('away')}) — "
+            f"bookmakers may not have opened this market yet; will retry when new odds snapshots arrive",
+        }
+    if snapshot_only_h2h:
+        # Partial data: still generate a report, but cap it as incomplete
+        return {
+            "ok": True,
+            "partial": True,
+            "reason": f"only h2h data available for {match_id}; AH and totals not yet priced. Report will be cap:C partial.",
+        }
+    return {"ok": True}
+
+
+def recover_safety_block_pipeline(event: dict[str, Any], recovery_id: str) -> dict[str, Any]:
+    """(a)-(e) Run deterministic pipeline for a safety_block when no legacy artifact exists.
+    
+    Guardrails:
+      (a) Match identity from direct_request, not blocked text
+      (b) Data precondition: fixture + odds snapshot → only then run pipeline
+      (c) MAX_ATTEMPTS + backoff enforced by caller (process_event)
+      (d) source_quality_cap = C, generated_by = recovery
+      (e) Must pass contract+guard before returning summary
+    """
+    match_id = extract_match_id(event)
+    if not match_id or not re.fullmatch(r"M\d{3}", match_id):
+        return {"status": "recovery_exhausted", "reason": f"could not extract valid match_id from event: {match_id}"}
+
+    # (a) Verify match via direct_request record
+    direct_request_path = latest_direct_request_for_match(match_id, event)
+    if not direct_request_path:
+        return {"status": "waiting", "reason": f"no direct_request found for {match_id} — cannot determine match identity"}
+
+    # (b) Data precondition
+    check = data_precondition_check(match_id)
+    if not check.get("ok"):
+        if check.get("defer"):
+            # Temporary data gap — odds snapshot doesn't have this match yet.
+            # Return waiting so the retry mechanism (30m/2h/6h) picks it up
+            # when new odds snapshots arrive.
+            return {"status": "waiting", "reason": check.get("reason", "odds data not yet available; will retry")}
+        return {"status": "recovery_exhausted", "reason": check.get("reason", "data precondition failed")}
+    is_partial = check.get("partial", False)
+
+    # Run pipeline: wc26-match-analyze.py
+    pipeline_script = SCRIPTS_DIR / ".." / ".." / ".." / "scripts" / "wc26-match-analyze.py"
+    if not pipeline_script.exists():
+        return {"status": "failed", "reason": f"pipeline script not found: {pipeline_script}"}
+    result = cmd_run(
+        [python_bin(), str(pipeline_script), "--match-id", match_id, "--direct-request", str(direct_request_path)],
+        timeout=300,
+    )
+    if result.returncode != 0:
+        return {
+            "status": "failed",
+            "reason": (result.stderr or result.stdout or "pipeline failed").strip()[:800],
+        }
+
+    # Find the latest manifest produced by pipeline
+    found = find_latest_manifest(match_id, None)
+    if not found:
+        return {"status": "failed", "reason": f"pipeline completed but no manifest found for {match_id}"}
+    manifest_path, manifest = found
+
+    # (d) Stamp generated_by: recovery on manifest
+    manifest["generated_by"] = "blocked_recovery"
+    manifest["recovery_id"] = recovery_id
+    manifest["source_quality_cap"] = "C"
+    if is_partial:
+        manifest["report_completeness"] = "partial"
+        manifest["source_quality"] = "D"
+        manifest["final_status"] = "watch"
+        manifest.setdefault("analysis_gates", {})["missing_markets"] = {
+            "status": "partial",
+            "reason": "only h2h data available when pipeline was run; AH/totals not yet priced",
+        }
+    write_json(manifest_path, manifest)
+
+    report_path = manifest_report_path(manifest, manifest_path)
+
+    # (e) contract + guard
+    ok, validation = validate_manifest(manifest_path, report_path)
+    if not ok:
+        return {
+            "status": "failed_contract",
+            "reason": validation,
+            "manifest_path": str(manifest_path),
+            "report_path": str(report_path) if report_path else "",
+        }
+
+    # Generate rich_summary
+    summary_ok, summary = direct_summary(manifest_path, report_path)
+    return {
+        "status": "recovered" if summary_ok else "recovered_summary_failed",
+        "reason": "safety_block pipeline recovery completed",
+        "manifest_path": str(manifest_path),
+        "report_path": str(report_path) if report_path else "",
+        "summary": summary if summary_ok else "",
+        "summary_error": "" if summary_ok else summary,
+    }
+
+
 def process_event(event_path: Path, state: dict[str, Any], *, force: bool = False) -> dict[str, Any]:
     event = read_json(event_path, {})
     if not isinstance(event, dict):
         return {"status": "failed", "reason": "event JSON root must be object", "event_path": str(event_path)}
     recovery_id = recovery_id_for(event)
     classification = classify_event(event)
-    if (
-        classification.get("category") == "safety_block"
-        and "missing_guarded_report" in set(classification.get("candidates") or [])
+    # safety_block can take two recovery routes:
+    #   Route 1: legacy guarded report (existing manifests/artifacts)
+    #   Route 2: pipeline execution (no prior data, need to generate from scratch)
+    if classification.get("category") == "safety_block" and "missing_guarded_report" in set(
+        classification.get("candidates") or []
     ):
         extracted_match_id = extract_match_id(event)
         if extracted_match_id and legacy_recovery_inputs(extracted_match_id, event):
@@ -1414,6 +1563,12 @@ def process_event(event_path: Path, state: dict[str, Any], *, force: bool = Fals
             classification["category"] = "missing_guarded_report"
             classification["auto_recoverable"] = True
             classification["recovery_route"] = "legacy_guarded_report"
+        elif extracted_match_id and re.fullmatch(r"M\d{3}", extracted_match_id):
+            # No legacy artifacts exist — try to run the full pipeline
+            classification = dict(classification)
+            classification["category"] = "safety_block_pipeline"
+            classification["auto_recoverable"] = True
+            classification["recovery_route"] = "pipeline"
     category = classification["category"]
     entries = state.setdefault("entries", {})
     entry = entries.setdefault(recovery_id, {})
@@ -1448,6 +1603,8 @@ def process_event(event_path: Path, state: dict[str, Any], *, force: bool = Fals
 
     if category in TERMINAL_CATEGORIES:
         result = terminal_result(category, classification)
+    elif category == "safety_block_pipeline":
+        result = recover_safety_block_pipeline(event, recovery_id)
     elif category == "missing_guarded_report":
         result = recover_missing_guarded_report(event)
     elif category == "missing_artifact":

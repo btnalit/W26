@@ -2,7 +2,7 @@
 
 When a user requests analysis and no cached `reports/match/` or
 `reports/artifacts/manifest-*.json` exists, do not invoke the full
-`wc26_match_pipeline.py` compiler unless snapshot freshness warrants it.
+`wc26-match-analyze.py` orchestrated chain unless snapshot freshness warrants it.
 Instead, follow this lightweight build path from existing multibook snapshots.
 
 ## Step 1: Find and validate the fixture
@@ -216,6 +216,6 @@ python3 direct_report_bind.py \
 | rich_summary.py | Run from manifest+report | Cannot run (missing artifacts) |
 | Deep Research | Reuse if fresh | Always run fresh, validate with contract |
 The uncached build is a **fallback path**. Prefer the full compiler pipeline
-(`wc26_match_pipeline.py`) when snapshot freshness justifies it and the
+(`wc26-match-analyze.py`) when snapshot freshness justifies it and the
 user explicitly asks for fresh data.
 user explicitly asks for fresh data.

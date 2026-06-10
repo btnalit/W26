@@ -197,6 +197,7 @@ def build_manifest(
         "manifest_id": manifest_id,
         "workflow_contract": "wc26.direct_report.v1",
         "artifact_contract": "wc26.artifact_chain.v1",
+        "mode": "live",
         "match_id": match_id,
         "match_label": f"{home} vs {away}",
         "home": home,
@@ -265,8 +266,10 @@ def run_orchestrator(
         devig_path = output_dir / f"devig-{mkey}-{match_id}-{stable_id(captured_at)}.json"
         write_json(devig_path, devig_artifact)
         devig_paths[mkey] = devig_path
+        aid = f"devig:{match_id}:{mkey}:{stable_id(captured_at)}"
         artifacts.append({
-            "path": str(devig_path),
+            "artifact_id": aid,
+            "path": str(devig_path.relative_to(output_dir.parent.parent)) if devig_path.is_relative_to(output_dir.parent.parent) else str(devig_path),
             "provides": ["no_vig"],
             "artifact_type": "devig",
             "market": mkey,
@@ -288,7 +291,9 @@ def run_orchestrator(
         if scan_ret.returncode != 0:
             print(f"[match-analyze]   crossbook 失败: {scan_ret.stderr[:300]}", file=sys.stderr)
         else:
+            crossbook_aid = f"crossbook:{match_id}:{stable_id(captured_at)}"
             artifacts.append({
+                "artifact_id": crossbook_aid,
                 "path": str(crossbook_path),
                 "provides": ["path_a_crossbook"],
                 "artifact_type": "crossbook_scan",
@@ -351,6 +356,7 @@ def run_orchestrator(
                     }
                     write_json(ct_path, ct_artifact)
                     ct_artifact_entry = {
+                        "artifact_id": ct_artifact["artifact_id"],
                         "path": str(ct_path),
                         "provides": ["path_c_consistency"],
                         "artifact_type": "consistency_triangle",
@@ -384,7 +390,9 @@ def run_orchestrator(
         if audit_ret.returncode == 0:
             # 把 audit artifact 补入 manifest
             manifest = read_json(manifest_path, manifest)
+            audit_aid = f"audit:{match_id}:{stable_id(captured_at)}"
             manifest.setdefault("artifacts", []).append({
+                "artifact_id": audit_aid,
                 "path": str(audit_path),
                 "provides": ["mechanism_audit"],
                 "artifact_type": "mechanism_audit",

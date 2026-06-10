@@ -109,39 +109,33 @@ or Asian settlement must come from deterministic JSON, not freeform report
 prose. Prefer the compiler boundary first:
 
 ```bash
-python3 skills/odds-analysis/scripts/wc26_match_pipeline.py \
-  --match-id M001 \
-  --mode simulation \
-  --window T-72h_early \
-  --market-set handicap \
-  --as-of-utc 2026-06-04T12:00:00Z
-```
-
-**Every match analysis must start with the orchestrator** before any deep
-research or Telegram reply. This generates the full deterministic artifact chain
-(devig + crossbook + consistency_triangle + mechanism_audit + manifest):
-
-```bash
 python3 scripts/wc26-match-analyze.py \
-  --snapshot snapshots/odds/the-odds-api-multibook-*.json \
-  --match-home "Mexico" \
-  --match-away "South Africa" \
-  --match-id M001 \
-  --window T-24h_confirm \
+  --snapshot snapshots/odds/the-odds-api-multibook-20260604T120000Z.json \
+  --match-home "Mexico" --match-away "South Africa" \
+  --match-id M001 --window T-72h_early \
   --output reports/artifacts \
   --mode full
 ```
 
-- `--mode full` (default): devig h2h/spreads/totals + crossbook + path_c + audit + manifest + report + direct_summary
-- `--mode fast`: crossbook only (quick look, no manifest)
-- The orchestrator reads `snapshots/health/*.health.json` to fail-closed on ERROR legs.
-- After the orchestrator finishes, read the manifest for deep research context.
-- Do not generate deep research before the orchestrator; the manifest is the baseline.
+**Every match analysis MUST start with the orchestrator.** `wc26-match-analyze.py`
+is the only deterministic entry point for live direct reports. It runs the full
+chain: devig + crossbook + consistency_triangle + mechanism_audit + manifest + report,
+then writes 6+ artifacts and a guarded report. Do NOT skip it unless the match
+has zero path_a edges (fast path below).
 
-The compiler writes the numeric manifest, Markdown report, and relay metadata,
-then runs `report_contract.py` and `report_guard.py`. Do not replace compiler
-numbers with LLM-generated numbers. If a live task needs richer data, feed fresh
-snapshot values into the compiler or an equivalent deterministic script first.
+Do not replace orchestrator numbers with LLM-generated numbers. If a live task
+needs richer data, feed fresh snapshot values into the orchestrator first.
+
+**Fast path (0 edges, 0 actionable → NO PLAY):** Run only crossbook scan, skip
+full orchestrator:
+
+```bash
+python3 skills/odds-analysis/scripts/cross_book_scan.py \
+  --input-snapshot snapshots/odds/the-odds-api-multibook-*.json \
+  --output reports/artifacts/crossbook-{match}-{date}.json \
+  --match-home "Canada" \
+  --match-away "Bosnia & Herzegovina"
+```
 
 For custom calculations, use `numeric_artifact.py` / `devig.py` first, then cite:
 
@@ -876,7 +870,7 @@ review-required: qualified_play needs human approval; see report_path
 - `scripts/devig.py`: no-vig, scalar EV, Asian settlement EV/Kelly, and uncertainty-gate helper.
 - `scripts/model_margin.py`: score matrix / Poisson baseline to margin distribution for Asian markets.
 - `scripts/numeric_artifact.py`: writes deterministic devig artifact JSON and number references.
-- `scripts/wc26_match_pipeline.py`: compiler/orchestrator that creates the numeric artifact chain, guarded Markdown report, and direct relay metadata without paid API use unless explicit snapshot inputs are supplied.
+|- `scripts/wc26-match-analyze.py`: **编排器 — 所有 live direct report 的唯一确定性入口**。运行完整链：devig（内联 Shin/Multiplicative）+ crossbook（Path A）+ consistency_triangle（Path C）+ mechanism_audit（综合审计）+ manifest + guarded report。传 `--mode full` 产出 ≥6 件 artifact。依赖快照 snapshot JSON，不额外消耗 API 配额。
 - `scripts/snapshot_resolver.py`: selects reusable snapshots by window/reuse group/TTL without spending quota.
 - `scripts/report_contract.py`: validates numeric provenance before report completion.
 - `scripts/report_guard.py`: validates Markdown report headers, simulation mode, manifest, and relay safety.
