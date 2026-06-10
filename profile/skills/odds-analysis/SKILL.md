@@ -117,6 +117,27 @@ python3 skills/odds-analysis/scripts/wc26_match_pipeline.py \
   --as-of-utc 2026-06-04T12:00:00Z
 ```
 
+**Every match analysis must start with the orchestrator** before any deep
+research or Telegram reply. This generates the full deterministic artifact chain
+(devig + crossbook + consistency_triangle + mechanism_audit + manifest):
+
+```bash
+python3 scripts/wc26-match-analyze.py \
+  --snapshot snapshots/odds/the-odds-api-multibook-*.json \
+  --match-home "Mexico" \
+  --match-away "South Africa" \
+  --match-id M001 \
+  --window T-24h_confirm \
+  --output reports/artifacts \
+  --mode full
+```
+
+- `--mode full` (default): devig h2h/spreads/totals + crossbook + path_c + audit + manifest + report + direct_summary
+- `--mode fast`: crossbook only (quick look, no manifest)
+- The orchestrator reads `snapshots/health/*.health.json` to fail-closed on ERROR legs.
+- After the orchestrator finishes, read the manifest for deep research context.
+- Do not generate deep research before the orchestrator; the manifest is the baseline.
+
 The compiler writes the numeric manifest, Markdown report, and relay metadata,
 then runs `report_contract.py` and `report_guard.py`. Do not replace compiler
 numbers with LLM-generated numbers. If a live task needs richer data, feed fresh
