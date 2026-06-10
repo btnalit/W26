@@ -61,5 +61,5 @@ python3 skills/odds-analysis/scripts/direct_summary.py --manifest <manifest.json
 | `path_a_crossbook artifact X must be a cross_book_scan artifact, not devig` | Devig provides includes `cross_book` | Strip from devig provides |
 | `missing artifact capabilities: mechanism_audit` | No mechanism_audit artifact in manifest | Generate via mechanism_audit.py |
 | `mechanism_audit path_a quotes_scanned does not match crossbook summary` | Audit generated before crossbook was in manifest | Regenerate audit after manifest update |
-| `analysis_gates missing mechanism_audit` | Gate not in manifest's analysis_gates | Add `"mechanism_audit": "pass"` |
-| `all report_guard_status entries must be pass` | Duplicate header blocks have mixed status | Replace ALL occurrences to `pass` |
+| analysis_gates missing mechanism_audit | Gate not in manifest's analysis_gates | Add "mechanism_audit": "pending" with reason "auto-populated at manifest generation" |
+| all report_guard_status entries must be pass | Duplicate header blocks have mixed status or guard didn't run | 重跑 guard 并修复实质错误；不得手动覆写为 pass |

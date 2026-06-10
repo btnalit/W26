@@ -215,8 +215,17 @@ def build_manifest(
     kickoff_utc: str,
     snapshot_path: str, snapshot_id: str,
     artifacts: list[dict],
+    captured_at_utc: str = "",
 ) -> dict[str, Any]:
     manifest_id = f"manifest-{match_id}-{window}-{utc_now()}"
+    # Compute real snapshot age if captured_at_utc is available
+    snapshot_age = 0
+    if captured_at_utc:
+        try:
+            captured_dt = datetime.fromisoformat(captured_at_utc.replace("Z", "+00:00")).astimezone(timezone.utc)
+            snapshot_age = round((datetime.now(timezone.utc) - captured_dt).total_seconds() / 60)
+        except Exception:
+            pass
     return {
         "manifest_id": manifest_id,
         "workflow_contract": "wc26.direct_report.v1",
@@ -236,8 +245,8 @@ def build_manifest(
         "final_status": "watch",
         "artifacts": artifacts,
         "source_freshness": {
-            "captured_at_utc": utc_now(),
-            "snapshot_age_minutes": 0,
+            "captured_at_utc": captured_at_utc or utc_now(),
+            "snapshot_age_minutes": snapshot_age,
             "sources": [
                 {"type": "the-odds-api", "path": snapshot_path, "id": snapshot_id}
             ]
@@ -281,15 +290,29 @@ def run_orchestrator(
     artifacts: list[dict[str, Any]] = []
     health_note = ""
 
-    # ── 可选的: 读 snapshot health 做 fail-closed ──
+    # ── 读 snapshot health 做 fail-closed (按本场比赛 ERROR flag) ──
     health_path = SANPSHOT_HEALTH_DIR / f"{snapshot_path.stem}.health.json"
+    match_health_status = "?"
     if health_path.exists():
         health = read_json(health_path, {})
-        if isinstance(health, dict) and health.get("overall_status") == "ERROR":
-            health_note = " [健康检查: ERROR — 快照中有带 ERROR 的比赛]"
-            print(f"[match-analyze]   WARN: snapshot health=ERROR{health_note}")
+        if isinstance(health, dict):
+            # Check per-match ERROR flags
+            this_match_has_error = False
+            for hm in health.get("matches", []):
+                if isinstance(hm, dict):
+                    match_label = hm.get("match", "")
+                    if match_home.lower() in match_label.lower() and match_away.lower() in match_label.lower():
+                        match_health_status = hm.get("status", "?")
+                        if hm.get("status") == "ERROR":
+                            this_match_has_error = True
+                            break
+            if this_match_has_error:
+                print(f"[match-analyze]   FAIL: match {match_home} vs {match_away} has health ERROR — 终止分析", file=sys.stderr)
+                return 1
+            else:
+                print(f"[match-analyze]   snapshot health: {health.get('overall_status', '?')} (this match: {match_health_status})")
         else:
-            print(f"[match-analyze]   snapshot health: {health.get('overall_status', '?')}")
+            print(f"[match-analyze]   snapshot health: unreadable, continuing")
 
     # ── Step 1: devig artifacts ──
     devig_paths: dict[str, Path] = {}
@@ -340,8 +363,37 @@ def run_orchestrator(
         print(f"[match-analyze]   crossbook 超时", file=sys.stderr)
 
     if mode == "fast":
-        print(f"[match-analyze] mode=fast, 跳过 manifest + path_c + audit")
-        print(f"[match-analyze] 产出: {crossbook_path}")
+        # fast 模式: 产 minimal manifest + 走 direct_summary, 禁止 LLM 手工组装
+        fast_manifest = build_manifest(
+            match_id, match_home, match_away,
+            window, timing_class, kickoff_utc,
+            str(snapshot_path), snapshot_id, artifacts,
+            captured_at_utc=captured_at,
+        )
+        fast_manifest["report_completeness"] = "fast_no_play"
+        fast_manifest["workflow_contract"] = "wc26.direct_report.v1.fast"
+        fast_manifest["mode"] = "fast"
+        fast_path = output_dir / f"manifest-{match_id}-{window}-{utc_now().replace(':','-')}.json"
+        write_json(fast_path, fast_manifest)
+        print(f"[match-analyze] mode=fast, 产出 manifest + crossbook")
+        print(f"[match-analyze]   manifest: {fast_path}")
+        print(f"[match-analyze]   crossbook: {crossbook_path}")
+
+        # direct_summary (不传 --report, 不强制 contract/guard)
+        ds_cmd = [
+            PYTHON, str(SKILL_SCRIPTS / "direct_summary.py"),
+            "--manifest", str(fast_path),
+            "--max-chars", "3900",
+        ]
+        try:
+            ds_ret = subprocess.run(ds_cmd, capture_output=True, text=True, timeout=60)
+            if ds_ret.returncode == 0:
+                print(f"[match-analyze]   fast path direct_summary: OK")
+                print(ds_ret.stdout)
+            else:
+                print(f"[match-analyze]   fast path direct_summary stderr: {ds_ret.stderr[:300]}", file=sys.stderr)
+        except subprocess.TimeoutExpired:
+            print(f"[match-analyze]   fast path direct_summary 超时", file=sys.stderr)
         return 0
 
     # ── Step 3: 写初始 manifest ──
@@ -349,6 +401,7 @@ def run_orchestrator(
         match_id, match_home, match_away,
         window, timing_class, kickoff_utc,
         str(snapshot_path), snapshot_id, artifacts,
+        captured_at_utc=captured_at,
     )
     if health_note:
         manifest["health_note"] = health_note.strip()
@@ -358,15 +411,15 @@ def run_orchestrator(
 
     # ── 设置所有 8 个 analysis_gates ──
     gates = manifest.setdefault("analysis_gates", {})
-    # devig: pass if devig artifacts exist
+    # devig: artifacts have been produced but not contract-verified
     has_h2h = any(a.get("artifact_type") == "devig" and a.get("market") == "h2h" for a in artifacts)
     has_spreads = any(a.get("artifact_type") == "devig" and a.get("market") == "spreads" for a in artifacts)
     has_totals_devig = any(a.get("artifact_type") == "devig" and a.get("market") == "totals" for a in artifacts)
     has_crossbook = any(a.get("artifact_type") == "crossbook_scan" for a in artifacts)
-    gates["devig_three_method"] = {"status": "pass" if has_h2h else "skipped_not_applicable"}
-    gates["path_a_crossbook"] = {"status": "pass" if has_crossbook else "skipped_not_applicable"}
-    gates["asian_handicap"] = {"status": "pass" if has_spreads else "skipped_not_applicable"}
-    gates["totals"] = {"status": "pass" if has_totals_devig else "skipped_not_applicable"}
+    gates["devig_three_method"] = {"status": "pending", "reason": "produced, awaiting report_contract verification"}
+    gates["path_a_crossbook"] = {"status": "pending", "reason": "produced, awaiting report_contract verification"}
+    gates["asian_handicap"] = {"status": "pending" if has_spreads else "skipped_not_applicable", "reason": "produced, awaiting report_contract verification" if has_spreads else ""}
+    gates["totals"] = {"status": "pending" if has_totals_devig else "skipped_not_applicable", "reason": "produced, awaiting report_contract verification" if has_totals_devig else ""}
     gates["path_b_model_diagnostic"] = {"status": "diagnostic", "reason": "no model data at generation time"}
     gates["source_freshness"] = {"status": "pass"}
     # path_c_consistency + mechanism_audit 由后续步骤设置
@@ -512,8 +565,8 @@ def generate_report(
         f"source_quality: {manifest.get('source_quality', 'B')}",
         f"final_status: {manifest.get('final_status', 'watch')}",
         f"artifact_manifest_path: {manifest.get('manifest_id', '')}",
-        "artifact_contract_status: pass",
-        "report_guard_status: pass",
+        "artifact_contract_status: pending",
+        "report_guard_status: pending",
         "",
         "## 1. One-Line View",
         f"Generated by wc26-match-analyze orchestrator.",

@@ -99,7 +99,7 @@ def test_cross_book_scan_records_all_quotes_and_cold_side_edge(tmp_path: Path) -
         encoding="utf-8",
     )
 
-    board = cross_book_scan.parse_odds_snapshot(str(snapshot), "Netherlands", "Japan")
+    board = cross_book_scan.parse_odds_snapshot(str(snapshot), "Netherlands", "Japan")["board"]
     h2h = cross_book_scan.scan_market(board, "h2h", ["netherlands", "draw", "japan"])
 
     assert h2h["status"] == "ok"
@@ -174,7 +174,7 @@ def test_cross_book_scan_normalizes_betfair_exchange_regional_key(tmp_path: Path
         encoding="utf-8",
     )
 
-    board = cross_book_scan.parse_odds_snapshot(str(snapshot), "Germany", "Curaçao")
+    board = cross_book_scan.parse_odds_snapshot(str(snapshot), "Germany", "Curaçao")["board"]
     h2h = cross_book_scan.scan_market(board, "h2h", ["curaçao", "germany", "draw"])
 
     assert "betfair_ex" in board["h2h"]

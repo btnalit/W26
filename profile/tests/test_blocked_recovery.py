@@ -358,21 +358,35 @@ def test_missing_artifact_recovery_generates_path_c_before_role_engine(tmp_path:
     def fake_cmd(args, timeout=60):
         joined = " ".join(str(item) for item in args)
         if "consistency_triangle.py" in joined:
+            # return artifact_entry format that try_generate_path_c_artifact expects
+            ct_artifact_path = tmp_path / "reports" / "artifacts" / "path-c-m123-recovery.json"
+            ct_artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            ct_artifact_path.write_text(json.dumps({
+                "artifact_id": "consistency:m123:recovery",
+                "artifact_type": "consistency_triangle",
+                "provides": ["path_c_consistency"],
+                "match": "Haiti vs Scotland",
+                "signal": {"type": None, "strength": "无"},
+                "discrepancy": {"pp": 0.4},
+                "market_profile": {
+                    "contract": "wc26.market_profile.v1",
+                    "status": "ok",
+                    "confidence": "high",
+                },
+            }))
             return subprocess.CompletedProcess(
                 args,
                 0,
-                json.dumps(
-                    {
-                        "match": "Haiti vs Scotland",
-                        "signal": {"type": None, "strength": "无"},
-                        "discrepancy": {"pp": 0.4},
-                        "market_profile": {
-                            "contract": "wc26.market_profile.v1",
-                            "status": "ok",
-                            "confidence": "high",
-                        },
-                    }
-                ),
+                json.dumps({
+                    "ok": True,
+                    "artifact_entry": {
+                        "artifact_id": "consistency:m123:recovery",
+                        "path": str(ct_artifact_path),
+                        "provides": ["path_c_consistency"],
+                        "artifact_type": "consistency_triangle",
+                        "script": "consistency_triangle.py",
+                    },
+                }),
                 "",
             )
         if "role_engine.py" in joined:

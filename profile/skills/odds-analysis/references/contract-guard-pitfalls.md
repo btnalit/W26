@@ -126,20 +126,24 @@ stale numbers. Always:
 
 ## Report guard requirements
 
-### 10. report_guard_status must be "pass" everywhere
+### 10. report_guard_status 必须由 guard/contract 验证后设定
 
-`report_guard.py` scans the entire file (header + body + section 9A). 
-Every occurrence of `report_guard_status:` must say `pass`, not `pending`.
+`report_guard.py` 扫描整个文件。`report_guard_status:` 的初始值必须为 `pending`，
+仅能在 report_contract + report_guard 均通过后由 guard/contract 程序自动覆写为 pass。
+**禁止人工或 LLM 手动将 pending 改为 pass。**
 
 ## Workflow for PASS reports
 
 ```
 1. Write report with report_guard_status: pending everywhere
 2. Run report_contract.py on manifest → must PASS
-3. Change ALL report_guard_status to pass
+3. Report contract 通过后, guard/contract 程序自动将 report_guard_status 覆写为 pass
 4. Run report_guard.py → should PASS  
 5. Run direct_summary.py → produces Telegram reply
 ```
+
+⚠️ **关键规则**: Step 3 必须由程序自动执行。禁止 LLM 或人工手动将 pending 改为 pass。
+如果 report_contract 从未运行, report_guard_status 必须保持 pending。奉行"誰验证谁落章"原则。
 
 ### 13. numeric_artifact.py crossbook wrapper: do NOT use for manifest
 
@@ -285,7 +289,7 @@ are still valid, but the contract requires acknowledging the missing gates.
 | `missing artifact capabilities: asian_handicap, devig_1x2, ...` | `provides` list missing tokens | Add all 5 capability tokens to provides |
 | `missing shin/power/multiplicative devig_methods` | Methods nested under `"1x2"` sub-key | Promote to top-level keys |
 | `missing odds_unit_contract` | Devig artifact missing contract field | Add `"odds_unit_contract": "..."` |
-| `report_guard_status must be pass` | Section 9A still says "pending" | Change all occurrences to "pass" |
+| `report_guard_status must be pass` | Section 9A still says "pending" | 确保 report_contract 已通过后再由 guard 自动覆写,不得手动改 |
 
 ### 11. Cache reuse: bind BEFORE report_guard
 

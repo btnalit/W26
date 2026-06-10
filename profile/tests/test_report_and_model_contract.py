@@ -304,7 +304,7 @@ def write_multibook_snapshot(path: Path, japan_price: float = 4.20) -> Path:
 
 
 def build_crossbook_from_snapshot(snapshot_path: Path) -> dict:
-    board = cross_book_scan.parse_odds_snapshot(str(snapshot_path), "Netherlands", "Japan")
+    board = cross_book_scan.parse_odds_snapshot(str(snapshot_path), "Netherlands", "Japan")["board"]
     h2h = cross_book_scan.scan_market(board, "h2h", ["netherlands", "draw", "japan"])
     payload = {
         "artifact_type": "crossbook_scan",

@@ -298,7 +298,9 @@ def _validate_path_a_recompute(
     match_home = artifact_payload.get("match_home") or _manifest_team(manifest, "home")
     match_away = artifact_payload.get("match_away") or _manifest_team(manifest, "away")
     try:
-        board = module.parse_odds_snapshot(str(snapshot_path), match_home, match_away)
+        parsed = module.parse_odds_snapshot(str(snapshot_path), match_home, match_away)
+        board = parsed["board"]
+        fetched_at_utc = parsed.get("fetched_at_utc")
     except Exception as exc:
         errors.append(f"crossbook artifact {artifact_id} input_snapshot recompute failed: {exc}")
         return
@@ -321,6 +323,7 @@ def _validate_path_a_recompute(
                 edge_threshold=edge_threshold,
                 actionable_threshold=actionable_threshold,
                 suspect_threshold=suspect_threshold,
+                fetched_at_utc=fetched_at_utc,
             )
         except Exception as exc:
             errors.append(f"crossbook artifact {artifact_id} market {market_name} recompute failed: {exc}")
