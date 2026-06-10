@@ -432,18 +432,7 @@ def build_summary(results: dict[str, Any]) -> dict[str, Any]:
     for market_result in results.get("markets", {}).values():
         if not isinstance(market_result, dict):
             continue
-        # h2h: flat structure with direct "edges"
-        if "edges" in market_result:
-            quotes_scanned += int(market_result.get("quotes_scanned") or 0)
-            for edge in market_result.get("edges", []):
-                if not isinstance(edge, dict):
-                    continue
-                all_edges.append(edge)
-                if edge.get("ev_band") == "noise_lt_5pp":
-                    noise_edges.append(edge)
-                if edge.get("actionable") is True or edge.get("qualifies") is True:
-                    actionable_edges.append(edge)
-        # spreads/totals (FIX-3): nested under line_groups
+        # spreads/totals (FIX-3): nested under line_groups — check FIRST to avoid double-count
         if "line_groups" in market_result:
             for line_result in market_result["line_groups"].values():
                 if not isinstance(line_result, dict):
@@ -457,6 +446,17 @@ def build_summary(results: dict[str, Any]) -> dict[str, Any]:
                         noise_edges.append(edge)
                     if edge.get("actionable") is True or edge.get("qualifies") is True:
                         actionable_edges.append(edge)
+        # h2h: flat structure with direct "edges"
+        elif "edges" in market_result:
+            quotes_scanned += int(market_result.get("quotes_scanned") or 0)
+            for edge in market_result.get("edges", []):
+                if not isinstance(edge, dict):
+                    continue
+                all_edges.append(edge)
+                if edge.get("ev_band") == "noise_lt_5pp":
+                    noise_edges.append(edge)
+                if edge.get("actionable") is True or edge.get("qualifies") is True:
+                    actionable_edges.append(edge)
 
     best_edge = max(all_edges, key=lambda e: e.get("ev_shin", -999), default=None)
     best_noise = max(noise_edges, key=lambda e: e.get("ev_shin", -999), default=None)
@@ -589,6 +589,22 @@ def main() -> int:
             # Aggregate counts
             results["markets"][mkey]["edge_count"] += line_result.get("edge_count", 0)
             results["markets"][mkey]["quotes_scanned"] += line_result.get("quotes_scanned", 0)
+        # Promote edges/quotes/anchor from line_groups to market level (contract needs these)
+        all_mkt_edges = []
+        all_mkt_quotes = []
+        first_valid = None
+        for lr in results["markets"][mkey]["line_groups"].values():
+            all_mkt_edges.extend(lr.get("edges", []))
+            all_mkt_quotes.extend(lr.get("quotes", []))
+            if first_valid is None and lr.get("sharp_anchor"):
+                first_valid = lr
+        results["markets"][mkey]["edges"] = all_mkt_edges
+        results["markets"][mkey]["quotes"] = all_mkt_quotes
+        if first_valid:
+            results["markets"][mkey]["sharp_anchor"] = first_valid.get("sharp_anchor")
+            results["markets"][mkey]["devig_primary"] = first_valid.get("devig_primary")
+            results["markets"][mkey]["outcomes_scanned"] = first_valid.get("outcomes_scanned")
+            results["markets"][mkey]["fair_probs"] = first_valid.get("fair_probs")
         # Summary for the market — only consider non-trivial line groups
         statuses = [g.get("status", "unknown") for g in results["markets"][mkey]["line_groups"].values()]
         relevant_statuses = [s for s in statuses if s not in ("no_anchor_outcomes", "no_market_data", "no_sharp_anchor")]

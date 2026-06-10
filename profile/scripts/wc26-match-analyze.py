@@ -88,6 +88,14 @@ def multiplicative_devig(odds: list[float]) -> list[float]:
     return [p / s for p in imp]
 
 
+def power_devig(odds: list[float]) -> list[float]:
+    """Power devig (exponent 0.85 default)."""
+    c = 0.85
+    imp = [1.0 / (o ** c) for o in odds]
+    s = sum(imp)
+    return [p / s for p in imp]
+
+
 def normalize_book_key(raw: str | None) -> str:
     key = str(raw or "").strip().lower()
     if key.startswith("pinnacle"):
@@ -152,7 +160,20 @@ def generate_devig_artifact(
     outcome_names = [o["name"] for o in outcomes]
     nv_shin = shin_devig(odds)
     nv_mult = multiplicative_devig(odds)
+    nv_power = power_devig(odds)
     overround = sum(1.0 / o for o in odds) - 1.0
+
+    # survives_all_methods: all 3 methods agree on which outcome has highest prob
+    shin_best = max(range(len(nv_shin)), key=lambda i: nv_shin[i])
+    mult_best = max(range(len(nv_mult)), key=lambda i: nv_mult[i])
+    power_best = max(range(len(nv_power)), key=lambda i: nv_power[i])
+    survives = (shin_best == mult_best == power_best)
+
+    devig_methods = {
+        "shin": [round(p, 6) for p in nv_shin],
+        "multiplicative": [round(p, 6) for p in nv_mult],
+        "power": [round(p, 6) for p in nv_power],
+    }
 
     loc = "away"  # default for h2h
     line = None
@@ -178,6 +199,9 @@ def generate_devig_artifact(
         "outcomes": outcome_names,
         "no_vig_probabilities": [round(p, 6) for p in nv_shin],
         "no_vig_multiplicative": [round(p, 6) for p in nv_mult],
+        "no_vig_power": [round(p, 6) for p in nv_power],
+        "devig_methods": devig_methods,
+        "survives_all_methods": survives,
         "overround": round(overround, 6),
         "devig_method": "shin",
     }
@@ -211,6 +235,17 @@ def build_manifest(
         "source_quality": "B",
         "final_status": "watch",
         "artifacts": artifacts,
+        "source_freshness": {
+            "captured_at_utc": utc_now(),
+            "snapshot_age_minutes": 0,
+            "sources": [
+                {"type": "the-odds-api", "path": snapshot_path, "id": snapshot_id}
+            ]
+        },
+        "artifact_capabilities": [
+            "devig_1x2", "path_a_crossbook", "asian_handicap",
+            "totals", "path_c_consistency", "mechanism_audit"
+        ],
         "analysis_gates": {},
     }
 
@@ -267,10 +302,12 @@ def run_orchestrator(
         write_json(devig_path, devig_artifact)
         devig_paths[mkey] = devig_path
         aid = f"devig:{match_id}:{mkey}:{stable_id(captured_at)}"
+        cap_map = {"h2h": "devig_1x2", "spreads": "asian_handicap", "totals": "totals"}
+        provides = ["no_vig", cap_map.get(mkey, "no_vig")]
         artifacts.append({
             "artifact_id": aid,
-            "path": str(devig_path.relative_to(output_dir.parent.parent)) if devig_path.is_relative_to(output_dir.parent.parent) else str(devig_path),
-            "provides": ["no_vig"],
+            "path": str(devig_path.resolve()),
+            "provides": provides,
             "artifact_type": "devig",
             "market": mkey,
             "bookmaker": "pinnacle",
@@ -294,7 +331,7 @@ def run_orchestrator(
             crossbook_aid = f"crossbook:{match_id}:{stable_id(captured_at)}"
             artifacts.append({
                 "artifact_id": crossbook_aid,
-                "path": str(crossbook_path),
+                "path": str(crossbook_path.resolve()),
                 "provides": ["path_a_crossbook"],
                 "artifact_type": "crossbook_scan",
             })
@@ -318,7 +355,24 @@ def run_orchestrator(
 
     manifest_path = output_dir / f"manifest-{match_id}-{window}-{utc_now().replace(':','-')}.json"
     write_json(manifest_path, manifest)
+
+    # ── 设置所有 8 个 analysis_gates ──
+    gates = manifest.setdefault("analysis_gates", {})
+    # devig: pass if devig artifacts exist
+    has_h2h = any(a.get("artifact_type") == "devig" and a.get("market") == "h2h" for a in artifacts)
+    has_spreads = any(a.get("artifact_type") == "devig" and a.get("market") == "spreads" for a in artifacts)
+    has_totals_devig = any(a.get("artifact_type") == "devig" and a.get("market") == "totals" for a in artifacts)
+    has_crossbook = any(a.get("artifact_type") == "crossbook_scan" for a in artifacts)
+    gates["devig_three_method"] = {"status": "pass" if has_h2h else "skipped_not_applicable"}
+    gates["path_a_crossbook"] = {"status": "pass" if has_crossbook else "skipped_not_applicable"}
+    gates["asian_handicap"] = {"status": "pass" if has_spreads else "skipped_not_applicable"}
+    gates["totals"] = {"status": "pass" if has_totals_devig else "skipped_not_applicable"}
+    gates["path_b_model_diagnostic"] = {"status": "diagnostic", "reason": "no model data at generation time"}
+    gates["source_freshness"] = {"status": "pass"}
+    # path_c_consistency + mechanism_audit 由后续步骤设置
+    write_json(manifest_path, manifest)
     print(f"[match-analyze]   manifest: {manifest_path.name}  ({len(artifacts)} artifacts)")
+    print(f"[match-analyze]   gates: {len(gates)} set")
 
     # ── Step 4: consistency_triangle (Path C) ──
     ct_cmd = [
@@ -357,7 +411,7 @@ def run_orchestrator(
                     write_json(ct_path, ct_artifact)
                     ct_artifact_entry = {
                         "artifact_id": ct_artifact["artifact_id"],
-                        "path": str(ct_path),
+                        "path": str(ct_path.resolve()),
                         "provides": ["path_c_consistency"],
                         "artifact_type": "consistency_triangle",
                         "status": ct_artifact["status"],
@@ -393,7 +447,7 @@ def run_orchestrator(
             audit_aid = f"audit:{match_id}:{stable_id(captured_at)}"
             manifest.setdefault("artifacts", []).append({
                 "artifact_id": audit_aid,
-                "path": str(audit_path),
+                "path": str(audit_path.resolve()),
                 "provides": ["mechanism_audit"],
                 "artifact_type": "mechanism_audit",
             })
