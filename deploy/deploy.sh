@@ -10,6 +10,16 @@ REPO_ROOT="$(cd "$(git rev-parse --show-toplevel 2>/dev/null)" && pwd)"
 COMMIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")"
 DEPLOY_TS="$(date -u +%Y%m%dT%H%M%SZ)"
 
+# ── 0. Guard: working tree must be clean — no uncommitted changes allowed ──
+if ! git diff --quiet HEAD 2>/dev/null; then
+    echo "FATAL: working tree is dirty. Commit or stash changes before deploying."
+    echo "       dirty files:"
+    git diff --name-only HEAD | sed 's/^/         /'
+    exit 1
+fi
+DIRTY_SUFFIX=""
+echo "  working tree clean — deploying ${COMMIT_SHA}"
+
 echo "==> WC26 Deploy ${COMMIT_SHA} @ ${DEPLOY_TS}"
 echo "    from ${REPO_ROOT}"
 
