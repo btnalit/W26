@@ -1,0 +1,54 @@
+# WC26 Production Deployment Manifest
+# Source repo → production path mapping
+# Run: bash deploy/deploy.sh
+
+profile:
+  description: "Hermes profile scripts — scheduled cron payloads and report contract"
+  source: "profile/"
+  targets:
+    - dest: "/wc26-profile/wc26_cron_payload.py"
+      from: "profile/scripts/wc26_cron_payload.py"
+    - dest: "/wc26-profile/report_contract.py"
+      from: "profile/scripts/wc26_cron_payload.py"  # NOTE: production uses profile-level version
+
+skill_scripts:
+  description: "Odds-analysis skill scripts — imported by cron payload via load_module()"
+  source: "profile/skills/odds-analysis/scripts/"
+  dest_dir: "/skills/odds-analysis/scripts/"
+  files:
+    - blocked_recovery.py
+    - calibration_gate.py
+    - consistency_triangle.py
+    - cross_book_scan.py
+    - deep_research_contract.py
+    - devig.py
+    - direct_report_bind.py
+    - direct_request_record.py
+    - direct_summary.py
+    - fixture_registry.py
+    - mechanism_audit.py
+    - model_margin.py
+    - numeric_artifact.py
+    - opportunity_watch.py
+    - report_contract.py
+    - report_guard.py
+    - rich_summary.py
+    - role_engine.py
+    - snapshot_resolver.py
+    - verify_keys.py
+    - wc26_match_pipeline.py
+
+shared_scripts:
+  description: "Shared scripts — importable from PYTHONPATH"
+  source: "workspace/scripts/"
+  targets:
+    - dest: "/hermesdata/worldcup-2026-handicap/scripts/cross_book_scan.py"
+      from: "workspace/scripts/cross_book_scan.py"
+
+init_files:
+  description: "__init__.py files for package imports"
+  files:
+    - dest: "/scripts/__init__.py"
+      content: "# Hermes shared scripts package\n"
+    - dest: "/skills/odds-analysis/scripts/__init__.py"
+      content: "# WC26 skill scripts package\n"
