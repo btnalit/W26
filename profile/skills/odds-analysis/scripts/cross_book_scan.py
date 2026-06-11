@@ -588,10 +588,39 @@ def main() -> int:
                 line_part = raw_line
             groups.setdefault(line_part, []).append(lbl)
 
+        # Guard: infernal blast for alternate-spread multi-line merge
+        # abs() grouping is correct for two-leg home/away spreads. If a market
+        # ever contains >2 outcomes on the same abs(line) (e.g. alternate
+        # spreads with mexico@-1.25 AND mexico@+1.25 in one market), or any
+        # team name appears more than once, the group is a multi-line mashup
+        # and must NOT be devigged as a single market.
+        suspect_groups: set[str] = set()
+        for gk, g_outcomes in groups.items():
+            if len(g_outcomes) > 2:
+                suspect_groups.add(gk)
+                continue
+            team_names = [o.split("@", 1)[0] for o in g_outcomes if "@" in o]
+            if len(set(team_names)) < len(team_names):
+                suspect_groups.add(gk)
+
         results["markets"][mkey] = {"line_groups": {}, "edge_count": 0, "quotes_scanned": 0}
         for line_key, line_outcomes in groups.items():
-            line_result = scan_market(board, mkey, line_outcomes,
-                                      anchor_meta=m_anchor_meta, **SCAN_KWARGS)
+            if line_key in suspect_groups:
+                line_result = {
+                    "status": "suspect_alternate_merge",
+                    "sharp_anchor": None,
+                    "market": mkey,
+                    "line": line_key,
+                    "books_scanned": 0,
+                    "quotes_scanned": 0,
+                    "edge_count": 0,
+                    "quotes": [],
+                    "edges": [],
+                    "note": f"abs(point) grouping merged >2 outcomes or duplicate team; possible alternate/multi-line spread — not devigged",
+                }
+            else:
+                line_result = scan_market(board, mkey, line_outcomes,
+                                          anchor_meta=m_anchor_meta, **SCAN_KWARGS)
             results["markets"][mkey]["line_groups"][line_key] = line_result
             # Aggregate counts
             results["markets"][mkey]["edge_count"] += line_result.get("edge_count", 0)

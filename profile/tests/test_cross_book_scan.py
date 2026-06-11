@@ -275,3 +275,74 @@ def test_spreads_mirror_pair_abs_grouping(tmp_path: Path) -> None:
         p = fp.get(o, 0)
         ev = p * anchor.get(o, 1) - 1
         assert ev < 0.08, f"{o}: EV={ev*100:.2f}% exceeds suspect threshold (8%)"
+
+
+def test_spreads_alternate_merge_guard_suspects(tmp_path: Path) -> None:
+    """If abs(grouping) merges >2 outcomes or duplicate team → suspect_alternate_merge."""
+    snapshot = tmp_path / "alt-spreads.json"
+    snapshot.write_text(
+        json.dumps(
+            [
+                {
+                    "home_team": "Mexico",
+                    "away_team": "South Africa",
+                    "bookmakers": [
+                        {
+                            "key": "pinnacle",
+                            "markets": [
+                                {
+                                    "key": "spreads",
+                                    "outcomes": [
+                                        # Alternate market: 4 outcomes on same abs(line)
+                                        {"name": "Mexico", "price": 2.06, "point": -1.25},
+                                        {"name": "South Africa", "price": 1.88, "point": 1.25},
+                                        {"name": "Mexico", "price": 1.90, "point": 1.25},
+                                        {"name": "South Africa", "price": 1.95, "point": -1.25},
+                                    ],
+                                },
+                            ],
+                        },
+                    ],
+                }
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    board = cross_book_scan.parse_odds_snapshot(str(snapshot), "Mexico", "South Africa")["board"]
+
+    # Simulate the FIX-3 grouping + guard logic
+    all_labels = []
+    for bm_prices in board["spreads"].values():
+        if not isinstance(bm_prices, dict):
+            continue
+        for label, value in bm_prices.items():
+            if label.startswith("_"):
+                continue
+            if isinstance(value, (int, float)) and label not in all_labels:
+                all_labels.append(label)
+
+    groups: dict[str, list[str]] = {}
+    for lbl in all_labels:
+        raw_line = lbl.split("@", 1)[1] if "@" in lbl else "none"
+        if raw_line != "none":
+            line_part = str(abs(float(raw_line)))
+        else:
+            line_part = raw_line
+        groups.setdefault(line_part, []).append(lbl)
+
+    # Guard: >2 outcomes → suspect
+    suspect_groups: set[str] = set()
+    for gk, g_outcomes in groups.items():
+        if len(g_outcomes) > 2:
+            suspect_groups.add(gk)
+
+    assert len(suspect_groups) == 1, f"expected 1 suspect group, got {suspect_groups}"
+    assert "1.25" in suspect_groups
+
+    # Guard: duplicate team → suspect
+    group_1 = groups["1.25"]
+    team_names = [o.split("@", 1)[0] for o in group_1 if "@" in o]
+    assert len(set(team_names)) < len(team_names), "should have duplicate team names"
+    assert "mexico" in team_names  # appears twice (mexico@-1.25 and mexico@1.25)

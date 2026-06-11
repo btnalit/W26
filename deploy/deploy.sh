@@ -27,7 +27,7 @@ echo "    from ${REPO_ROOT}"
 BACKUP_DIR="/wc26-backup/${DEPLOY_TS}"
 mkdir -p "$BACKUP_DIR"
 echo "--- backup previous deployment to ${BACKUP_DIR} ---"
-for src in /wc26-profile /skills/odds-analysis /scripts/snapshot_resolver.py /scripts/__init__.py; do
+for src in /wc26-profile /skills/odds-analysis /scripts/snapshot_resolver.py /scripts/__init__.py /hermesdata/worldcup-2026-handicap/snapshots/fixtures/venue-overrides.json; do
     if [ -e "$src" ]; then
         dst="${BACKUP_DIR}/$(echo "$src" | sed 's|^/||' | tr '/' '_')"
         cp -r "$src" "$dst" 2>/dev/null || true

@@ -1,0 +1,8 @@
+{
+  "description": "WC26 venue overrides — football-data.org may return null for unknown venues. This file overrides them. Deployed to /hermesdata/worldcup-2026-handicap/snapshots/fixtures/venue-overrides.json",
+  "venues": {
+    "M001": "Estadio Azteca",
+    "fd:537327": "Estadio Azteca",
+    "__doc__": "Keys: local ordinal (M001..Mxxx), or football-data ID (fd:123456). Values: venue name string."
+  }
+}
