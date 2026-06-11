@@ -188,3 +188,90 @@ def test_cross_book_scan_normalizes_betfair_exchange_regional_key(tmp_path: Path
     assert h2h["raw_actionable_count"] == 1
     assert h2h["relay_actionable_count"] == 0
     assert h2h["qualified_play_count"] == 0
+
+
+def test_spreads_mirror_pair_abs_grouping(tmp_path: Path) -> None:
+    """Verifies that -1.25/+1.25 mirror pair groups into one devig set via abs(point)."""
+    snapshot = tmp_path / "mirror.json"
+    snapshot.write_text(
+        json.dumps(
+            [
+                {
+                    "home_team": "Mexico",
+                    "away_team": "South Africa",
+                    "bookmakers": [
+                        {
+                            "key": "pinnacle",
+                            "markets": [
+                                {
+                                    "key": "spreads",
+                                    "outcomes": [
+                                        {"name": "Mexico", "price": 2.06, "point": -1.25},
+                                        {"name": "South Africa", "price": 1.88, "point": 1.25},
+                                    ],
+                                },
+                            ],
+                        },
+                        {
+                            "key": "marathonbet",
+                            "markets": [
+                                {
+                                    "key": "spreads",
+                                    "outcomes": [
+                                        {"name": "Mexico", "price": 2.10, "point": -1.25},
+                                        {"name": "South Africa", "price": 1.85, "point": 1.25},
+                                    ],
+                                },
+                            ],
+                        },
+                    ],
+                }
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    board = cross_book_scan.parse_odds_snapshot(str(snapshot), "Mexico", "South Africa")["board"]
+    all_labels = []
+    for bm_prices in board["spreads"].values():
+        if not isinstance(bm_prices, dict):
+            continue
+        for label, value in bm_prices.items():
+            if label.startswith("_"):
+                continue
+            if isinstance(value, (int, float)) and label not in all_labels:
+                all_labels.append(label)
+
+    # Group by abs(point) — simulating the fix logic
+    groups: dict[str, list[str]] = {}
+    for lbl in all_labels:
+        raw_line = lbl.split("@", 1)[1] if "@" in lbl else "none"
+        if raw_line != "none":
+            import math
+            line_part = str(abs(float(raw_line)))
+        else:
+            line_part = raw_line
+        groups.setdefault(line_part, []).append(lbl)
+
+    # Both outcomes must be in the same group (key="1.25")
+    assert len(groups) == 1, f"expected 1 group, got {len(groups)}: {groups}"
+    group_key = list(groups.keys())[0]
+    group_outcomes = groups[group_key]
+    assert len(group_outcomes) == 2, f"expected 2 outcomes in group, got {len(group_outcomes)}: {group_outcomes}"
+    outcome_names = {o.split("@")[0] for o in group_outcomes}
+    assert "mexico" in outcome_names and "south africa" in outcome_names
+
+    # Full scan: fair probs must sum to ≈1.0
+    result = cross_book_scan.scan_market(board, "spreads", group_outcomes)
+    fp = result.get("fair_probs", {}).get("shin", {})
+    probs = list(fp.values())
+    assert len(probs) == 2, f"expected 2 fair probs, got {len(probs)}"
+    assert abs(sum(probs) - 1.0) < 0.001, f"fair prob sum={sum(probs):.4f} != 1.0"
+
+    # No SUSPECT-level EV on anchor side (Pinnacle)
+    anchor = board["spreads"].get("pinnacle", {})
+    for o in group_outcomes:
+        p = fp.get(o, 0)
+        ev = p * anchor.get(o, 1) - 1
+        assert ev < 0.08, f"{o}: EV={ev*100:.2f}% exceeds suspect threshold (8%)"

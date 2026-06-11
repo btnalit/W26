@@ -575,10 +575,17 @@ def main() -> int:
         if not all_labels:
             continue
 
-        # Group by @line suffix
+        # Group by @line suffix (spreads: use abs(point) so -1.25/+1.25 pair into same group)
         groups: dict[str, list[str]] = {}
         for lbl in all_labels:
-            line_part = lbl.split("@", 1)[1] if "@" in lbl else "none"
+            raw_line = lbl.split("@", 1)[1] if "@" in lbl else "none"
+            if mkey == "spreads" and raw_line != "none":
+                try:
+                    line_part = str(abs(float(raw_line)))
+                except ValueError:
+                    line_part = raw_line
+            else:
+                line_part = raw_line
             groups.setdefault(line_part, []).append(lbl)
 
         results["markets"][mkey] = {"line_groups": {}, "edge_count": 0, "quotes_scanned": 0}
