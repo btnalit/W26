@@ -186,9 +186,17 @@ def crossbook_market_projection(payload: dict[str, Any] | None, market_key: str,
     raw_outcomes = market.get("outcomes_scanned") if isinstance(market.get("outcomes_scanned"), list) else list(probs)
     outcomes = [str(item) for item in raw_outcomes if str(item) in probs]
     outcomes = _ordered_market_labels(outcomes, market_key)
-    rendered = " / ".join(f"{outcome} {fmt_pct(probs[outcome])}" for outcome in outcomes)
-    if not rendered:
-        return None
+    # Board prices (raw Pinnacle/h2h) vs fair (no-vig)
+    board_prices = market.get("sharp_board_prices") if isinstance(market.get("sharp_board_prices"), dict) else {}
+    fair_odds_str = " / ".join(f"{outcome} {fmt_pct(probs[outcome])}" for outcome in outcomes) if outcomes else ""
+    board_str = ""
+    if board_prices and outcomes:
+        board_parts = [f"{outcome} {fmt_num(board_prices.get(outcome, 0))}" for outcome in outcomes if outcome in board_prices]
+        if board_parts:
+            board_str = " | board: " + " / ".join(board_parts)
+    overround = market.get("sharp_overround")
+    over_str = f" | overround={overround*100:+.2f}%" if overround is not None and market_key != "spreads" else ""
+    rendered = f"{fair_odds_str}{board_str}{over_str}" if fair_odds_str else "N/A"
     return (
         f"- {label}: anchor={market.get('sharp_anchor', 'N/A')} | {rendered} "
         f"| method={method} quotes={market.get('quotes_scanned', 'N/A')} "
@@ -466,13 +474,30 @@ def build_summary(manifest_path: str | Path, report_path: str | Path | None = No
         markets = payload.get("markets") if isinstance(payload.get("markets"), dict) else {}
         for market_name in ("h2h", "spreads", "totals"):
             market_result = markets.get(market_name)
-            if isinstance(market_result, dict):
-                lines.append(
-                    f"- {market_name}: status={market_result.get('status', 'N/A')} "
-                    f"anchor={market_result.get('sharp_anchor', 'N/A')} "
-                    f"quotes={market_result.get('quotes_scanned', 'N/A')} "
-                    f"edges={len(market_result.get('edges', [])) if isinstance(market_result.get('edges'), list) else 'N/A'}"
+            if not isinstance(market_result, dict):
+                continue
+            parts = [f"- {market_name}: status={market_result.get('status', 'N/A')}"]
+            board_prices = market_result.get("sharp_board_prices")
+            fair_probs = market_result.get("fair_probs", {}).get("shin")
+            overround = market_result.get("sharp_overround")
+            outcomes = market_result.get("outcomes_scanned", [])
+            if board_prices and isinstance(board_prices, dict) and outcomes:
+                board_rendered = " / ".join(
+                    f"{o} {fmt_num(board_prices[o])}" for o in outcomes if o in board_prices
                 )
+                parts.append(f"board: {board_rendered}")
+                if overround is not None and market_name != "spreads":
+                    parts.append(f"overround={overround*100:+.2f}%")
+                if fair_probs and isinstance(fair_probs, dict):
+                    fair_odds_rendered = " / ".join(
+                        f"{fmt_num(1.0/fair_probs[o] if fair_probs[o] > 0 else 0)}"
+                        for o in outcomes if o in fair_probs
+                    )
+                    parts.append(f"fair: {fair_odds_rendered}")
+            parts.append(f"anchor={market_result.get('sharp_anchor', 'N/A')}")
+            parts.append(f"quotes={market_result.get('quotes_scanned', 'N/A')}")
+            parts.append(f"edges={len(market_result.get('edges', [])) if isinstance(market_result.get('edges'), list) else 'N/A'}")
+            lines.append(" ".join(parts))
     else:
         lines.append(f"- gate: {gate_status(manifest, 'path_a_crossbook')} | 缺 cross_book_scan artifact")
 

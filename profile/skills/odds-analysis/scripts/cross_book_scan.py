@@ -419,6 +419,9 @@ def scan_market(board: dict[str, dict[str, Any]],
             m: {o: round(fair[m][i], 4) for i, o in enumerate(anchor_outcomes)}
             for m in DEVIG_METHODS
         },
+        "sharp_board_prices": {
+            o: round(sharp_odds[i], 3) for i, o in enumerate(anchor_outcomes)
+        },
         "quotes": quotes,
         "edges": edges,
     }
