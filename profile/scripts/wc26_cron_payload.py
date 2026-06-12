@@ -619,7 +619,14 @@ def artifact_payload_by_capability(
 
 
 def normalize_team_name(value: Any) -> str:
-    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+    normalized = re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+    aliases = {
+        "czechia": "czechrepublic",
+        "czechrep": "czechrepublic",
+        "rsa": "southafrica",
+        "kor": "southkorea",
+    }
+    return aliases.get(normalized, normalized)
 
 
 def team_label_matches(label: Any, team: Any) -> bool:
@@ -953,6 +960,18 @@ def closing_odds_by_match(snapshot: tuple[pathlib.Path, datetime] | None) -> dic
         key = f"{om.get('home_team','')}_{om.get('away_team','')}".lower().replace(" ", "")
         closing_odds[key] = om
     return closing_odds
+
+
+def closing_odds_for_fixture(closing_odds: dict[str, Any], home: str, away: str) -> dict[str, Any]:
+    exact_key = f"{home}_{away}".lower().replace(" ", "")
+    if exact_key in closing_odds:
+        return closing_odds[exact_key]
+    for om in closing_odds.values():
+        if not isinstance(om, dict):
+            continue
+        if team_label_matches(om.get("home_team"), home) and team_label_matches(om.get("away_team"), away):
+            return om
+    return {}
 
 
 def stale_postmatch_fixture_records(all_matches: list[dict[str, Any]], fixture_captured: datetime) -> list[dict[str, Any]]:
@@ -1501,7 +1520,7 @@ def postmatch_grade() -> int:
         # --- CLV from closing odds ---
         clv = None
         clv_detail = {}
-        close_odds_raw = closing_odds.get(match_key, {})
+        close_odds_raw = closing_odds_for_fixture(closing_odds, home, away)
         if close_odds_raw:
             # Find Pinnacle closing h2h
             for bk in close_odds_raw.get("bookmakers", []):

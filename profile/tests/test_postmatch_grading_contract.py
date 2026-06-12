@@ -369,6 +369,7 @@ def test_clv_positions_are_percent_ev_and_brier_has_uniform_baseline() -> None:
         }]
     }
     positions = module.compute_clv_positions(report_text, close_odds_raw, "South Korea")
+    assert module.closing_odds_for_fixture({"x": {"home_team": "South Korea", "away_team": "Czech Republic"}}, "South Korea", "Czechia")["away_team"] == "Czech Republic"
     by_market = {item["market"]: item for item in positions}
     assert by_market["h2h"]["unit"] == "percent_ev_fraction"
     assert by_market["h2h"]["clv_ev"] == 0.0349
