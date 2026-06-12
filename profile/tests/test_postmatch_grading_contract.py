@@ -196,7 +196,7 @@ def test_postmatch_grade_uses_pre_kickoff_close_and_writes_context_score_and_pat
     write_fixture_snapshot(tmp_path)
     pre = write_odds_snapshot(tmp_path, "20260611T160000Z", "2026-06-11T16:00:00Z", 1.43)
     write_odds_snapshot(tmp_path, "20260611T213000Z", "2026-06-11T21:30:00Z", 99.0)
-    write_report_bundle(tmp_path)
+    report_path = write_report_bundle(tmp_path)
 
     assert module.postmatch_grade() == 0
     out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
@@ -222,10 +222,14 @@ def test_postmatch_grade_uses_pre_kickoff_close_and_writes_context_score_and_pat
     assert ledger["outcome_agrees"] is True
     assert ledger["pp_band"] == "ge15"
 
+    first_hash = card["content_hash"]
+    report_path.write_text(report_path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
     assert module.postmatch_grade() == 0
     capsys.readouterr()
     assert len(list((tmp_path / "grading" / "cards").glob("*.json"))) == 1
     assert len(list((tmp_path / "grading" / "path_c_signal_ledger").glob("*.json"))) == 1
+    second_card = json.loads(cards[0].read_text(encoding="utf-8"))
+    assert second_card["content_hash"] == first_hash
 
 
 def test_postmatch_grade_blocks_stale_fixture_snapshot_after_kickoff(tmp_path: Path, monkeypatch, capsys) -> None:

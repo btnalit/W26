@@ -1462,7 +1462,8 @@ def postmatch_grade() -> int:
             "fixture_snapshot": str(fixture_snap[0]),
         }
         card_id = "grade-" + stable_hash([match_id_value, window_value])
-        content_hash = stable_hash(content_core)
+        hash_core = {key: value for key, value in content_core.items() if key not in {"report_mtime_utc"}}
+        content_hash = stable_hash(hash_core)
         card = {
             **content_core,
             "card_id": card_id,
