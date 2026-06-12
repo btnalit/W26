@@ -8,6 +8,9 @@ profile:
   targets:
     - dest: "/wc26-profile/wc26_cron_payload.py"
       from: "profile/scripts/wc26_cron_payload.py"
+    - dest: "/root/.hermes/scripts/wc26*.py"
+      from: "deploy-generated wrapper -> /wc26-profile/wc26*.py"
+      note: "Hermes cron registry requires relative scripts under ~/.hermes/scripts; wrappers exec the production profile scripts"
 
 skill_scripts:
   description: "Odds-analysis skill scripts — imported by cron payload via load_module()"
