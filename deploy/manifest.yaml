@@ -10,7 +10,10 @@ profile:
       from: "profile/scripts/wc26_cron_payload.py"
     - dest: "/root/.hermes/scripts/wc26*.py"
       from: "deploy-generated Python wrapper -> /wc26-profile/wc26*.py"
-      note: "Hermes cron registry executes .py scripts with Python, so wrappers must be valid Python and exec the production profile scripts"
+      note: "Default-profile compatibility wrappers; Hermes cron executes .py scripts with Python"
+    - dest: "/root/.hermes/profiles/wc26-handicap-analyst/scripts/wc26*.py"
+      from: "deploy-generated Python wrapper -> /wc26-profile/wc26*.py"
+      note: "WC26 independent-gateway cron wrappers; jobs should run with profile=wc26-handicap-analyst so delivery uses that profile/gateway"
 
 skill_scripts:
   description: "Odds-analysis skill scripts — imported by cron payload via load_module()"

@@ -42,23 +42,27 @@ echo "  backed up to ${BACKUP_DIR}"
 
 # ── 1. Profile scripts ──
 echo "--- profile/scripts ---"
-mkdir -p /wc26-profile /root/.hermes/scripts
+WC26_PROFILE_HOME="/root/.hermes/profiles/wc26-handicap-analyst"
+WC26_PROFILE_SCRIPTS="${WC26_PROFILE_HOME}/scripts"
+mkdir -p /wc26-profile /root/.hermes/scripts "$WC26_PROFILE_SCRIPTS"
 for f in "$REPO_ROOT"/profile/scripts/wc26*.py; do
     base="$(basename "$f")"
     cp "$f" "/wc26-profile/${base}"
     chmod +x "/wc26-profile/${base}"
     if [ "$base" != "wc26_cron_payload.py" ]; then
-        cat > "/root/.hermes/scripts/${base}" <<EOF
+        for wrapper_dir in /root/.hermes/scripts "$WC26_PROFILE_SCRIPTS"; do
+            cat > "${wrapper_dir}/${base}" <<EOF
 #!/usr/bin/env python3
 import subprocess
 import sys
 raise SystemExit(subprocess.call([sys.executable, "/wc26-profile/${base}", *sys.argv[1:]]))
 EOF
-        chmod +x "/root/.hermes/scripts/${base}"
+            chmod +x "${wrapper_dir}/${base}"
+        done
     fi
 done
 echo "  deployed $(ls /wc26-profile/wc26*.py | wc -l) wc26 profile scripts"
-echo "  installed Hermes cron wrappers in /root/.hermes/scripts"
+echo "  installed Hermes cron wrappers in /root/.hermes/scripts and ${WC26_PROFILE_SCRIPTS}"
 
 # ── 2. Skill scripts ──
 echo "--- skill scripts ---"
