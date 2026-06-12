@@ -590,12 +590,12 @@ def classify_signal(
             "action": f"AH+1X2 反推 P(O) 比 Totals 市场高 {abs_disc:.0f}pp，方向与散户偏 Over 一致 → Over 可能是低估价值",
         }
     elif direction == "under_cheap" and public_bias_direction == "over_bias":
-        # Totals prices Under lower than AH+1X2 implies
-        # Public pushes Over → Under may be artificially inflated
+        # AH+1X2 implies Under is cheaper/more valuable than the totals board.
+        # Public Over bias can leave the opposite side underpriced by the market.
         return {
             "type": "人性税（Under被撑）",
             "strength": strength,
-            "action": f"散户偏 Over 把 Under 撑高，AH+1X2 反推显示 Totals 市场 Under 偏贵 → Under 可能是价值",
+            "action": f"散户偏 Over 把 Under 撑高，AH+1X2 反推显示 Totals 市场 Under 被低估 → Under 可能是价值",
         }
     elif strength in ("中", "强"):
         return {

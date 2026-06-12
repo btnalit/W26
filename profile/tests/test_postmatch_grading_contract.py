@@ -204,6 +204,7 @@ def test_postmatch_grade_uses_pre_kickoff_close_and_writes_context_score_and_pat
 
     cards = sorted((tmp_path / "grading" / "cards").glob("*.json"))
     assert len(cards) == 1
+    assert cards[0].name == f"grade-{module.stable_hash(['M001', 'T-60m_lineup_final'])}.json"
     card = json.loads(cards[0].read_text(encoding="utf-8"))
     assert card["idempotency_key"] == "M001:T-60m_lineup_final"
     assert card["closing_odds_snapshot"] == str(pre)
@@ -241,3 +242,69 @@ def test_postmatch_grade_blocks_stale_fixture_snapshot_after_kickoff(tmp_path: P
     assert out["status"] == "blocked_stale_fixture_snapshot"
     assert out["stale_match_count"] == 1
     assert out["required_action"] == "run wc26-fixture-collect with WC26_FORCE_REFRESH=1 before grading"
+
+
+class FakeResponse:
+    def __init__(self, status_code: int, payload: dict, headers: dict | None = None, text: str = "") -> None:
+        self.status_code = status_code
+        self._payload = payload
+        self.headers = headers or {}
+        self.text = text
+
+    def json(self) -> dict:
+        return self._payload
+
+
+def test_fixture_collect_fetches_match_detail_events_for_finished_matches(tmp_path: Path, monkeypatch, capsys) -> None:
+    module = load_payload()
+    configure_workspace(module, tmp_path)
+    monkeypatch.setenv("FOOTBALL_DATA_TOKEN", "token")
+    monkeypatch.setenv("WC26_FORCE_REFRESH", "1")
+    calls: list[str] = []
+
+    def fake_get(url: str, headers: dict, timeout: int):
+        calls.append(url)
+        if url.endswith("/competitions/WC/matches"):
+            return FakeResponse(
+                200,
+                {
+                    "matches": [
+                        {"id": 537327, "status": "FINISHED", "homeTeam": {"name": "Mexico"}, "awayTeam": {"name": "South Africa"}},
+                        {"id": 537328, "status": "TIMED", "homeTeam": {"name": "Canada"}, "awayTeam": {"name": "Qatar"}},
+                    ]
+                },
+                headers={"X-Requests-Available-Minute": "9"},
+            )
+        if url.endswith("/matches/537327"):
+            return FakeResponse(
+                200,
+                {
+                    "match": {
+                        "id": 537327,
+                        "events": [
+                            {"type": "red_card", "team": {"name": "South Africa"}, "minute": 45},
+                            {"type": "card", "card": "red", "team": {"name": "South Africa"}, "minute": 80},
+                            {"type": "goal", "team": {"name": "Mexico"}, "minute": 90},
+                        ]
+                    }
+                },
+            )
+        raise AssertionError(f"unexpected URL: {url}")
+
+    monkeypatch.setattr(module.requests, "get", fake_get)
+
+    assert module.fixture_collect() == 0
+    out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert out["status"] == "ok"
+    assert out["fixture_detail_summary"] == {"attempted": 1, "merged": 1, "failed": 0, "http_statuses": {"200": 1}}
+    assert calls == [
+        "https://api.football-data.org/v4/competitions/WC/matches",
+        "https://api.football-data.org/v4/matches/537327",
+    ]
+    snapshot = json.loads((tmp_path / "snapshots" / "fixtures" / "football-data-wc-matches-latest.json").read_text(encoding="utf-8"))
+    match = snapshot["data"]["matches"][0]
+    flags = module.extract_match_context_flags(match, 2, 1)
+    red_flags = [flag for flag in flags if flag["type"] == "red_card"]
+    stoppage_flags = [flag for flag in flags if flag["type"] == "stoppage_winner"]
+    assert len(red_flags) == 2
+    assert len(stoppage_flags) == 1

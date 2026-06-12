@@ -867,6 +867,56 @@ def source_health() -> int:
     return completed.returncode
 
 
+def _merge_fixture_detail_fields(match: dict[str, Any], detail_payload: dict[str, Any]) -> bool:
+    """Merge event/incidents/context detail fields from a football-data match detail payload."""
+    detail = detail_payload.get("match") if isinstance(detail_payload.get("match"), dict) else detail_payload
+    if not isinstance(detail, dict):
+        return False
+    changed = False
+    for key in ("events", "incidents", "match_context_flags"):
+        value = detail.get(key)
+        if isinstance(value, list):
+            match[key] = value
+            changed = True
+    return changed
+
+
+def _fixture_detail_statuses() -> set[str]:
+    raw = os.environ.get("WC26_FIXTURE_DETAIL_STATUSES", "FINISHED,AWARDED")
+    return {part.strip().upper() for part in raw.split(",") if part.strip()}
+
+
+def enrich_fixture_details(matches: list[dict[str, Any]], token: str) -> dict[str, Any]:
+    """Fetch per-match detail records for settled fixtures so postmatch flags are data-backed."""
+    statuses = _fixture_detail_statuses()
+    summary = {"attempted": 0, "merged": 0, "failed": 0, "http_statuses": {}}
+    for match in matches:
+        if not isinstance(match, dict):
+            continue
+        status = str(match.get("status") or "").upper()
+        fixture_id = match.get("id")
+        if status not in statuses or fixture_id in (None, ""):
+            continue
+        summary["attempted"] += 1
+        try:
+            response = requests.get(
+                f"https://api.football-data.org/v4/matches/{fixture_id}",
+                headers={"X-Auth-Token": token},
+                timeout=30,
+            )
+        except requests.RequestException:
+            summary["failed"] += 1
+            continue
+        status_key = str(response.status_code)
+        summary["http_statuses"][status_key] = int(summary["http_statuses"].get(status_key, 0)) + 1
+        if response.status_code != 200:
+            summary["failed"] += 1
+            continue
+        if _merge_fixture_detail_fields(match, response.json()):
+            summary["merged"] += 1
+    return summary
+
+
 def fixture_collect() -> int:
     if not force_refresh_requested():
         reusable = reusable_snapshot(
@@ -908,9 +958,11 @@ def fixture_collect() -> int:
     )
     if response.status_code == 200:
         data = response.json()
+        matches = data.get("matches", []) if isinstance(data, dict) else []
+        detail_summary = enrich_fixture_details(matches, token) if isinstance(matches, list) else {"attempted": 0, "merged": 0, "failed": 0, "http_statuses": {}}
         path = WORKSPACE / "snapshots" / "fixtures" / "football-data-wc-matches-latest.json"
-        write_json(path, {"captured_at_utc": utc_now(), "source": "football-data.org", "data": data})
-        payload.update(match_count=len(data.get("matches", [])), snapshot_path=str(path))
+        write_json(path, {"captured_at_utc": utc_now(), "source": "football-data.org", "fixture_detail_source": "football-data.org/v4/matches/{id}", "fixture_detail_summary": detail_summary, "data": data})
+        payload.update(match_count=len(matches), fixture_detail_summary=detail_summary, snapshot_path=str(path))
     else:
         payload.update(error=response.text[:240], exit_code=1)
     return emit(payload)

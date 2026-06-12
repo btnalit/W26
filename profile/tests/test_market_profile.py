@@ -72,6 +72,16 @@ def test_quarter_total_known_push_aware_answer():
 
     assert abs(q - 0.508) < 0.002
 
+def test_under_cheap_public_bias_copy_says_under_undervalued_not_expensive():
+    ct = load_module("consistency_triangle_copy", "consistency_triangle.py")
+
+    signal = ct.classify_signal(-15.6, "under_cheap", "over_bias")
+
+    assert signal["type"] == "人性税（Under被撑）"
+    assert "Under 被低估" in signal["action"]
+    assert "Under 偏贵" not in signal["action"]
+
+
 def test_quarter_total_profile_uses_settlement_equiv():
     ct = load_module("consistency_triangle_q", "consistency_triangle.py")
     data = m010_pinnacle()
