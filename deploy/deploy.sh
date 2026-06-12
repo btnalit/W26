@@ -49,9 +49,10 @@ for f in "$REPO_ROOT"/profile/scripts/wc26*.py; do
     chmod +x "/wc26-profile/${base}"
     if [ "$base" != "wc26_cron_payload.py" ]; then
         cat > "/root/.hermes/scripts/${base}" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-exec /usr/bin/env python3 "/wc26-profile/${base}" "\$@"
+#!/usr/bin/env python3
+import subprocess
+import sys
+raise SystemExit(subprocess.call([sys.executable, "/wc26-profile/${base}", *sys.argv[1:]]))
 EOF
         chmod +x "/root/.hermes/scripts/${base}"
     fi
