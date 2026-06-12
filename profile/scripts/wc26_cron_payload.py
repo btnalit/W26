@@ -1448,11 +1448,13 @@ def postmatch_grade() -> int:
     print(f"[postmatch] {len(reports)} reports, {len(all_matches)} fixture records")
 
     graded = 0
+    settled_seen = 0
     graded_cards: list[dict[str, Any]] = []
     for fm in all_matches:
         status = fm.get("status", fm.get("stage", ""))
         if status not in ("FINISHED", "AWARDED"):
             continue
+        settled_seen += 1
 
         home = fm.get("homeTeam", {}).get("name", "")
         away = fm.get("awayTeam", {}).get("name", "")
@@ -1807,9 +1809,10 @@ def postmatch_grade() -> int:
             reports_seen=len(reports),
         ))
     return emit(manifest(
-        "wc26-postmatch-grade", "ready_no_settled_cards",
+        "wc26-postmatch-grade", "ready_no_new_cards" if settled_seen else "ready_no_settled_cards",
         reports_seen=len(reports),
-        reason="no FINISHED matches found yet (pre-tournament)",
+        settled_matches_seen=settled_seen,
+        reason="settled matches already graded idempotently" if settled_seen else "no FINISHED matches found yet (pre-tournament)",
     ))
 
 
