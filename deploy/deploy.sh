@@ -42,12 +42,15 @@ echo "  backed up to ${BACKUP_DIR}"
 
 # ── 1. Profile scripts ──
 echo "--- profile/scripts ---"
-mkdir -p /wc26-profile
+mkdir -p /wc26-profile /root/.hermes/scripts
 for f in "$REPO_ROOT"/profile/scripts/wc26*.py; do
     cp "$f" "/wc26-profile/$(basename "$f")"
     chmod +x "/wc26-profile/$(basename "$f")"
+    cp "$f" "/root/.hermes/scripts/$(basename "$f")"
+    chmod +x "/root/.hermes/scripts/$(basename "$f")"
 done
 echo "  deployed $(ls /wc26-profile/wc26*.py | wc -l) wc26 profile scripts"
+echo "  synced wc26 cron wrappers to /root/.hermes/scripts"
 
 # ── 2. Skill scripts ──
 echo "--- skill scripts ---"
