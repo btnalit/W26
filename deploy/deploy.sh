@@ -103,10 +103,14 @@ DEPLOY_LOG="/wc26-backup/DEPLOYED_SHA"
 } > "$DEPLOY_LOG"
 echo "  wrote: ${DEPLOY_LOG}"
 
-# ── 6. Scheduler manifest assertion ──
+# ── 6. Deterministic scheduler registration + assertion ──
+echo "--- cron register/update ---"
+python3 "$REPO_ROOT/deploy/register_wc26_cron.py" --manifest "$REPO_ROOT/deploy/cron-manifest.json"
+echo "  WC26 cron registry reconciled and misplaced default-profile jobs removed"
+
 echo "--- cron manifest assertion ---"
 python3 "$REPO_ROOT/deploy/check_cron_manifest.py" --manifest "$REPO_ROOT/deploy/cron-manifest.json"
-echo "  cron registry contains required WC26 jobs"
+echo "  cron registry matches WC26 profile/name/entrypoint contract"
 
 echo ""
 echo "==> Deploy ${COMMIT_SHA} complete. Verify:"

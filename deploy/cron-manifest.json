@@ -1,13 +1,17 @@
 {
-  "schema_version": "wc26.cron_manifest.v1",
+  "schema_version": "wc26.cron_manifest.v2",
+  "profile": "wc26-handicap-analyst",
   "jobs": [
     {
       "name": "wc26-fixture-collect",
+      "profile": "wc26-handicap-analyst",
       "script": "wc26-fixture-collect.py",
       "required": true,
-      "schedule": "postmatch settlement watcher: KO+110m, KO+130m, then every 30m until FINISHED",
+      "schedule": "*/30 * * * *",
       "deliver": "local",
       "mode": "no-agent",
+      "workdir": "/hermesdata/worldcup-2026-handicap",
+      "prompt": "Run deterministic WC26 fixture collection payload.",
       "env": {
         "WC26_FORCE_REFRESH": "1",
         "WC26_FIXTURE_TTL_MINUTES": "0"
@@ -15,38 +19,50 @@
     },
     {
       "name": "wc26-match-window-direct",
+      "profile": "wc26-handicap-analyst",
       "script": "wc26-match-window-direct.py",
       "required": true,
       "schedule": "*/15 * * * *",
       "deliver": "telegram",
-      "mode": "agent",
+      "mode": "no-agent",
+      "workdir": "/hermesdata/worldcup-2026-handicap",
+      "prompt": "Run deterministic WC26 match window direct summary payload.",
       "env": {}
     },
     {
       "name": "wc26-postmatch-grade",
+      "profile": "wc26-handicap-analyst",
       "script": "wc26-postmatch-grade.py",
       "required": true,
-      "schedule": "after fixture refresh reports FINISHED",
+      "schedule": "*/30 * * * *",
       "deliver": "local",
       "mode": "no-agent",
+      "workdir": "/hermesdata/worldcup-2026-handicap",
+      "prompt": "Run deterministic WC26 postmatch grading payload.",
       "env": {}
     },
     {
       "name": "wc26-postmatch-notify",
+      "profile": "wc26-handicap-analyst",
       "script": "wc26-postmatch-notify.py",
       "required": true,
-      "schedule": "after wc26-postmatch-grade writes cards",
+      "schedule": "*/30 * * * *",
       "deliver": "telegram",
-      "mode": "agent",
+      "mode": "no-agent",
+      "workdir": "/hermesdata/worldcup-2026-handicap",
+      "prompt": "Run deterministic WC26 postmatch grade notification payload.",
       "env": {}
     },
     {
       "name": "wc26-blocked-recovery",
+      "profile": "wc26-handicap-analyst",
       "script": "wc26-blocked-recovery.py",
       "required": true,
       "schedule": "*/30 * * * *",
       "deliver": "local",
       "mode": "no-agent",
+      "workdir": "/hermesdata/worldcup-2026-handicap",
+      "prompt": "Run deterministic WC26 blocked recovery payload.",
       "env": {}
     }
   ]
