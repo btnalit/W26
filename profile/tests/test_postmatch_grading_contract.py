@@ -312,3 +312,81 @@ def test_fixture_collect_fetches_match_detail_events_for_finished_matches(tmp_pa
     stoppage_flags = [flag for flag in flags if flag["type"] == "stoppage_winner"]
     assert len(red_flags) == 2
     assert len(stoppage_flags) == 1
+
+
+def test_report_matching_uses_identity_not_group_context_mentions(tmp_path: Path) -> None:
+    module = load_payload()
+    configure_workspace(module, tmp_path)
+    fixture_path = write_fixture_snapshot(tmp_path)
+    good_report = write_report_bundle(tmp_path)
+    bad_manifest = write_json(
+        tmp_path / "reports" / "artifacts" / "manifest-KOR-CZE.json",
+        {"match_id": "KOR-CZE", "football_data_id": 537328, "window": "T-24h_confirm", "final_status": "pass"},
+    )
+    bad_report = tmp_path / "reports" / "match" / "KOR-CZE.md"
+    bad_report.write_text(
+        "\n".join([
+            "# South Korea vs Czechia",
+            f"artifact_manifest_path: {bad_manifest}",
+            "window: T-24h_confirm",
+            "Group context mentions Mexico vs South Africa, but identity is KOR-CZE.",
+        ]),
+        encoding="utf-8",
+    )
+    # Make the wrong report newer: mtime must not outrank stable identity.
+    bad_report.touch()
+    fm = json.loads(fixture_path.read_text())["data"]["matches"][0]
+    candidates = module.report_candidates_for_fixture([bad_report, good_report], fm, fixture_path)
+    assert candidates
+    assert candidates[0][1] == good_report
+
+
+def test_clv_positions_are_percent_ev_and_brier_has_uniform_baseline() -> None:
+    module = load_payload()
+    report_text = "\n".join([
+        "| Market | Line | Book | Source Unit | Current Decimal | Snapshot ID | No-Vig Market (Shin) | p_adj | Edge | Note |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| 1X2 | Korea | Pinnacle | decimal | 2.80 | snap | 0.3464 | 0.3464 | 0 | PASS |",
+        "| 1X2 | Draw | Pinnacle | decimal | 3.11 | snap | 0.3110 | 0.3110 | 0 | PASS |",
+        "| 1X2 | Czechia | Pinnacle | decimal | 2.83 | snap | 0.3426 | 0.3426 | 0 | PASS |",
+        "| AH 0.0 | Korea | Pinnacle | decimal | 1.94 | snap | 0.5026 | 0.5026 | 0 | PASS |",
+        "| AH 0.0 | Czechia | Pinnacle | decimal | 1.96 | snap | 0.4974 | 0.4974 | 0 | PASS |",
+    ])
+    close_odds_raw = {
+        "bookmakers": [{
+            "key": "pinnacle",
+            "markets": [
+                {"key": "h2h", "outcomes": [
+                    {"name": "Czech Republic", "price": 3.06},
+                    {"name": "South Korea", "price": 2.65},
+                    {"name": "Draw", "price": 3.14},
+                ]},
+                {"key": "spreads", "outcomes": [
+                    {"name": "Czech Republic", "price": 2.12, "point": -0.0},
+                    {"name": "South Korea", "price": 1.83, "point": 0.0},
+                ]},
+            ],
+        }]
+    }
+    positions = module.compute_clv_positions(report_text, close_odds_raw, "South Korea")
+    by_market = {item["market"]: item for item in positions}
+    assert by_market["h2h"]["unit"] == "percent_ev_fraction"
+    assert by_market["h2h"]["clv_ev"] == 0.0349
+    assert by_market["h2h"]["clv_pct"] == 3.49
+    assert by_market["spreads"]["clv_ev"] == 0.0425
+    assert by_market["spreads"]["clv_pct"] == 4.25
+
+    probs = module.parse_report_1x2_model_probs(report_text)
+    brier = sum((probs[i] - [1, 0, 0][i]) ** 2 for i in range(3))
+    assert round(brier, 4) == 0.6413
+    assert round(brier - module.uniform_three_way_brier_baseline(), 4) == -0.0254
+
+
+def test_deep_research_f4_under_claim_is_red_card_downgraded() -> None:
+    module = load_payload()
+    findings = [
+        {"finding_id": "DR-F4", "direction": "toward_under", "confidence": "medium", "claim": "South Africa 5-man defense"},
+    ]
+    scored = module.score_deep_research_findings(findings, "home", [{"type": "red_card", "team": "South Africa"}])
+    assert scored[0]["score"] == "confounded_by_red_card"
+    assert scored[0]["red_card_downgraded"] is True

@@ -480,6 +480,47 @@ def write_path_c_signal_ledger(entry: dict[str, Any]) -> bool:
     return True
 
 
+def remove_superseded_grading_cards(card: dict[str, Any]) -> list[str]:
+    """Keep one current postmatch grading card per football-data fixture.
+
+    The postmatch cron grades the latest governed report for a settled match.  If a
+    previous bad run wrote the same fixture against a different report/window, leaving
+    it in place pollutes first-page counts and min_graded_cards.  Removal is scoped by
+    stable football_data_id/match_id and never touches unrelated fixtures.
+    """
+    removed: list[str] = []
+    if not GRADING_CARDS_DIR.exists():
+        return removed
+    current = str(card.get("card_id") or "")
+    fdid = str(card.get("football_data_id") or "")
+    match_id = str(card.get("match_id") or "")
+    for path in GRADING_CARDS_DIR.glob("*.json"):
+        payload = read_json(path, None)
+        if not isinstance(payload, dict) or payload.get("card_id") == current:
+            continue
+        same_fixture = (fdid and str(payload.get("football_data_id") or "") == fdid) or (match_id and str(payload.get("match_id") or "") == match_id)
+        if same_fixture:
+            path.unlink()
+            removed.append(str(path))
+    return removed
+
+
+def remove_superseded_path_c_ledgers(entry: dict[str, Any]) -> list[str]:
+    removed: list[str] = []
+    if not PATH_C_LEDGER_DIR.exists():
+        return removed
+    current = str(entry.get("signal_id") or "")
+    match_id = str(entry.get("match_id") or "")
+    for path in PATH_C_LEDGER_DIR.glob("*.json"):
+        payload = read_json(path, None)
+        if not isinstance(payload, dict) or payload.get("signal_id") == current:
+            continue
+        if match_id and str(payload.get("match_id") or "") == match_id:
+            path.unlink()
+            removed.append(str(path))
+    return removed
+
+
 def canonical_match_id_for_fixture(fm: dict[str, Any], fallback: str, fixture_path: pathlib.Path) -> str:
     fallback = str(fallback or "").strip().upper()
     if re.fullmatch(r"M\d{3}", fallback):
@@ -575,6 +616,201 @@ def artifact_payload_by_capability(
         if isinstance(payload, dict):
             return artifact, payload
     return None, None
+
+
+def normalize_team_name(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def team_label_matches(label: Any, team: Any) -> bool:
+    left = normalize_team_name(label)
+    right = normalize_team_name(team)
+    return bool(left and right and (left == right or left in right or right in left))
+
+
+def manifest_football_data_id(payload: dict[str, Any]) -> str:
+    match = payload.get("match") if isinstance(payload.get("match"), dict) else {}
+    for value in (payload.get("football_data_id"), match.get("football_data_id"), payload.get("canonical_id"), match.get("canonical_id")):
+        if value in (None, ""):
+            continue
+        text = str(value).strip()
+        if text.startswith("fd:"):
+            text = text.split(":", 1)[1]
+        if text:
+            return text
+    return ""
+
+
+def load_report_manifest(report_path: pathlib.Path) -> tuple[pathlib.Path | None, dict[str, Any]]:
+    text = report_path.read_text(encoding="utf-8", errors="replace")
+    manifest_path = resolve_path(report_field(text, "artifact_manifest_path", ""))
+    if manifest_path and manifest_path.exists():
+        payload = read_json(manifest_path, {})
+        if isinstance(payload, dict):
+            return manifest_path, payload
+    return None, {}
+
+
+def report_candidates_for_fixture(
+    reports: list[pathlib.Path],
+    fm: dict[str, Any],
+    fixture_path: pathlib.Path,
+) -> list[tuple[float, pathlib.Path, pathlib.Path | None, dict[str, Any]]]:
+    """Return report candidates that match the fixture by stable identity, not text mention."""
+    fixture_id = str(fm.get("id") or "").strip()
+    fallback_id = canonical_match_id_for_fixture(fm, "", fixture_path)
+    home = (fm.get("homeTeam") or {}).get("name", "")
+    away = (fm.get("awayTeam") or {}).get("name", "")
+    candidates: list[tuple[float, pathlib.Path, pathlib.Path | None, dict[str, Any]]] = []
+    for report_path in reports:
+        manifest_path, payload = load_report_manifest(report_path)
+        text = report_path.read_text(encoding="utf-8", errors="replace")
+        ids = {manifest_football_data_id(payload), report_field(text, "football_data_id", "")}
+        local_ids = {manifest_match_id(payload), report_field(text, "match_id", "").upper()}
+        exact_id = bool(fixture_id and fixture_id in ids)
+        exact_local = bool(fallback_id and fallback_id in local_ids)
+        manifest_match = payload.get("match") if isinstance(payload.get("match"), dict) else {}
+        manifest_home = payload.get("home") or manifest_match.get("home")
+        manifest_away = payload.get("away") or manifest_match.get("away")
+        exact_teams = bool(manifest_home and manifest_away and team_label_matches(manifest_home, home) and team_label_matches(manifest_away, away))
+        teams_field = report_field(text, "teams", "")
+        frontmatter_teams = bool(teams_field and team_label_matches(home, teams_field) and team_label_matches(away, teams_field))
+        if exact_id or exact_local or exact_teams or frontmatter_teams:
+            candidates.append((report_path.stat().st_mtime, report_path, manifest_path, payload))
+    return sorted(candidates, key=lambda item: item[0], reverse=True)
+
+
+def parse_report_1x2_model_probs(text: str) -> list[float] | None:
+    rows: list[float] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|") or "1X2" not in stripped:
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        if len(cells) < 7 or cells[0].lower() in {"market", "---"}:
+            continue
+        prob = None
+        for cell in cells[5:]:
+            parts = cell.split()
+            value = numeric_or_none(parts[0] if parts else cell)
+            if value is not None and 0 <= value <= 1:
+                prob = value
+                break
+        if prob is not None:
+            rows.append(prob)
+    return rows[:3] if len(rows) >= 3 else None
+
+
+def uniform_three_way_brier_baseline() -> float:
+    return 2.0 / 3.0
+
+
+def market_outcomes_from_pinnacle(close_odds_raw: dict[str, Any], market_key: str) -> list[dict[str, Any]]:
+    for bk in close_odds_raw.get("bookmakers", []):
+        if bk.get("key") != "pinnacle":
+            continue
+        for mk in bk.get("markets", []):
+            valid_keys = {market_key, "1x2"} if market_key == "h2h" else {market_key}
+            if mk.get("key") in valid_keys:
+                outcomes = mk.get("outcomes", [])
+                return [oc for oc in outcomes if isinstance(oc, dict)]
+    return []
+
+
+def devig_outcomes_by_name(outcomes: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    rows = [(str(oc.get("name", "")).strip(), numeric_or_none(oc.get("price")), oc.get("point")) for oc in outcomes]
+    rows = [(name, price, point) for name, price, point in rows if name and price and price > 0]
+    if len(rows) < 2:
+        return {}
+    probs = DEVIG.devig_shin([price for _, price, _ in rows])
+    return {name: {"price": price, "point": point, "fair_prob": prob} for (name, price, point), prob in zip(rows, probs)}
+
+
+def parse_entry_positions(text: str, home: str) -> list[dict[str, Any]]:
+    positions: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        if len(cells) < 6:
+            continue
+        market = cells[0]
+        label = cells[1] if len(cells) > 1 else ""
+        if not team_label_matches(label, home):
+            continue
+        entry_odds = None
+        for cell in cells[3:6]:
+            parts = cell.split()
+            value = numeric_or_none(parts[0] if parts else cell)
+            if value is not None and value > 1.01:
+                entry_odds = value
+                break
+        if entry_odds is None:
+            continue
+        market_lower = market.lower()
+        if "1x2" in market_lower:
+            positions.append({"market": "h2h", "side": "home", "label": label, "entry_odds": entry_odds, "entry_src": "report_market_board"})
+        elif "ah" in market_lower or "spread" in market_lower:
+            m = re.search(r"[-+]?\d+(?:\.\d+)?", market)
+            line_value = numeric_or_none(m.group(0)) if m else None
+            positions.append({"market": "spreads", "side": "home", "label": label, "entry_odds": entry_odds, "entry_line": line_value, "entry_src": "report_market_board"})
+    return positions
+
+
+def compute_clv_positions(text: str, close_odds_raw: dict[str, Any], home: str) -> list[dict[str, Any]]:
+    positions: list[dict[str, Any]] = []
+    for entry in parse_entry_positions(text, home):
+        by_name = devig_outcomes_by_name(market_outcomes_from_pinnacle(close_odds_raw, str(entry["market"])))
+        matched_name = next((name for name in by_name if team_label_matches(name, home)), None)
+        if not matched_name:
+            continue
+        closing = by_name[matched_name]
+        if entry.get("market") == "spreads" and entry.get("entry_line") is not None and closing.get("point") is not None:
+            if abs(abs(float(entry["entry_line"])) - abs(float(closing["point"]))) > 1e-9:
+                continue
+        clv_ev = round(float(entry["entry_odds"]) * float(closing["fair_prob"]) - 1.0, 4)
+        positions.append({
+            **entry,
+            "closing_outcome": matched_name,
+            "closing_point": closing.get("point"),
+            "closing_board_odds": closing.get("price"),
+            "closing_fair_prob": closing.get("fair_prob"),
+            "clv_ev": clv_ev,
+            "clv_pct": round(clv_ev * 100.0, 2),
+            "unit": "percent_ev_fraction",
+        })
+    return positions
+
+
+def score_deep_research_findings(findings: Any, actual_outcome: str, context_flags: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not isinstance(findings, list):
+        return []
+    red_card_seen = any(flag.get("type") == "red_card" for flag in context_flags if isinstance(flag, dict))
+    scored: list[dict[str, Any]] = []
+    for item in findings:
+        if not isinstance(item, dict):
+            continue
+        direction = str(item.get("direction") or "").lower()
+        finding_id = str(item.get("finding_id") or "")
+        score = "not_applicable"
+        if direction in {"toward_favorite", "toward_home"}:
+            score = "hit" if actual_outcome == "home" else "miss"
+        elif direction in {"toward_underdog", "toward_away"}:
+            score = "hit" if actual_outcome == "away" else "miss"
+        elif direction == "toward_under":
+            score = "confounded_by_red_card" if red_card_seen and (finding_id == "DR-F4" or "defens" in str(item.get("claim", "")).lower()) else "ledger_only"
+        elif direction in {"mixed", "neutral"}:
+            score = "mixed"
+        scored.append({
+            "finding_id": finding_id,
+            "direction": item.get("direction"),
+            "confidence": item.get("confidence"),
+            "score": score,
+            "red_card_downgraded": bool(score == "confounded_by_red_card"),
+            "claim": item.get("claim"),
+        })
+    return scored
 
 
 def scoreline_profile_from_path_c(path_c_payload: dict[str, Any] | None, actual_score: str) -> dict[str, Any]:
@@ -1225,24 +1461,17 @@ def postmatch_grade() -> int:
         elif odds_snap:
             closing_quality = "unknown"
 
-        # Find matching report
-        report_path = None
-        for rp in reports:
-            text = rp.read_text(encoding="utf-8", errors="replace")
-            if home in text and away in text:
-                report_path = rp
-                break
-        if not report_path:
+        # Find matching report by governed identity (football_data_id / local Mxxx),
+        # never by free-text team mention.  This prevents group-context mentions from
+        # drifting M001 into the KOR-CZE report.
+        candidates = report_candidates_for_fixture(reports, fm, fixture_snap[0])
+        if not candidates:
             continue
-
+        _, report_path, report_manifest_path, report_manifest = candidates[0]
         text = report_path.read_text(encoding="utf-8", errors="replace")
         report_mtime = datetime.fromtimestamp(report_path.stat().st_mtime, tz=timezone.utc)
-        report_manifest: dict[str, Any] = {}
-        report_manifest_path = resolve_path(report_field(text, "artifact_manifest_path", ""))
-        if report_manifest_path and report_manifest_path.exists():
-            loaded_manifest = read_json(report_manifest_path, {})
-            if isinstance(loaded_manifest, dict):
-                report_manifest = loaded_manifest
+        if not isinstance(report_manifest, dict):
+            report_manifest = {}
 
         # --- Parse entry prices from report frontmatter ---
         entry_match = re.search(r"entry_price:\s*(.+)", text)
@@ -1254,12 +1483,17 @@ def postmatch_grade() -> int:
             text
         )
         model_probs = [float(x) for x in p_model_match[:3]] if len(p_model_match) >= 3 else None
+        if model_probs is None:
+            model_probs = parse_report_1x2_model_probs(text)
 
         # --- L1: Model Brier ---
         brier = None
+        brier_baseline_uniform = uniform_three_way_brier_baseline()
+        brier_skill_vs_uniform = None
         ll = None
         if model_probs and len(model_probs) == 3:
             brier = sum((model_probs[i] - actual_vec[i])**2 for i in range(3))
+            brier_skill_vs_uniform = round(brier - brier_baseline_uniform, 4)
             eps = 1e-15
             clipped = [max(min(p, 1-eps), eps) for p in model_probs]
             ll = -sum(actual_vec[i] * math.log(clipped[i]) for i in range(3))
@@ -1353,9 +1587,27 @@ def postmatch_grade() -> int:
                                             "closing_no_vig": closing_fair_prob,
                                             "closing_outcome": home_outcome_name or close_names[0],
                                             "clv_raw": clv,
+                                            "clv_pct": round(clv * 100.0, 2),
+                                            "unit": "percent_ev_fraction",
                                             "entry_src": entry_src,
+                                            "market": "h2h",
                                         }
                                     break
+
+        clv_positions = compute_clv_positions(text, close_odds_raw, home) if close_odds_raw else []
+        if clv_positions:
+            primary = next((item for item in clv_positions if item.get("market") == "h2h"), clv_positions[0])
+            clv = primary["clv_ev"]
+            clv_detail = {
+                "entry_odds": primary["entry_odds"],
+                "closing_no_vig": primary["closing_fair_prob"],
+                "closing_outcome": primary["closing_outcome"],
+                "clv_raw": primary["clv_ev"],
+                "clv_pct": primary["clv_pct"],
+                "unit": "percent_ev_fraction",
+                "entry_src": primary.get("entry_src"),
+                "market": primary.get("market"),
+            }
 
         # --- L2: Decision audit ---
         status_match = re.search(r"final_status:\s*(\S+)", text)
@@ -1384,7 +1636,13 @@ def postmatch_grade() -> int:
         window_value = report_field(text, "window", manifest_window(report_manifest))
         context_flags = extract_match_context_flags(fm, int(score_h), int(score_a))
         path_c_artifact, path_c_payload = artifact_payload_by_capability(report_manifest, report_manifest_path, "path_c_consistency")
+        deep_research_artifact, deep_research_payload = artifact_payload_by_capability(report_manifest, report_manifest_path, "deep_research")
         scoreline_profile = scoreline_profile_from_path_c(path_c_payload, result_str)
+        deep_research_findings = score_deep_research_findings(
+            deep_research_payload.get("findings") if isinstance(deep_research_payload, dict) else None,
+            actual_outcome,
+            context_flags,
+        )
 
         # --- Build Section 11 text ---
         graded_at = utc_now()
@@ -1399,15 +1657,21 @@ def postmatch_grade() -> int:
 
 **L1 — Model Score:**
 - Brier: {brier_line}
+- Uniform 3-way Brier baseline: {brier_baseline_uniform:.4f}
+- Brier skill vs uniform (Brier - baseline; lower is better): {brier_skill_vs_uniform if brier_skill_vs_uniform is not None else "N/A"}
 - Log-loss: {ll_line}
 
 **CLV:"""
         if clv_detail:
             section_11 += f"""
-- Entry no-vig: {clv_detail['entry_no_vig']:.4f}
-- Closing no-vig: {clv_detail['closing_no_vig']:.4f}
-- CLV raw: {clv_detail['clv_raw']:+.4f}
+- Primary market: {clv_detail.get('market')}
+- Entry odds: {clv_detail['entry_odds']:.4f}
+- Closing fair probability: {clv_detail['closing_no_vig']:.4f}
+- CLV EV: {clv_detail['clv_pct']:+.2f}%
+- Unit: percent EV = entry_odds × closing_fair_prob − 1
 - Direction: {"market_moved_in_favor" if clv and clv > 0 else "market_moved_against_entry"}"""
+            if clv_positions:
+                section_11 += "\n- CLV positions: " + json.dumps(clv_positions, ensure_ascii=False)
         else:
             section_11 += "\n- N/A (no closing odds available)"
 
@@ -1420,6 +1684,8 @@ def postmatch_grade() -> int:
 **Context Flags:** {json.dumps(context_flags, ensure_ascii=False) if context_flags else "[]"}
 
 **Scoreline Profile:** {json.dumps(scoreline_profile, ensure_ascii=False)}
+
+**Deep Research Finding Scores:** {json.dumps(deep_research_findings, ensure_ascii=False) if deep_research_findings else "[]"}
 
 **Lesson:** (to be filled by owner)
 
@@ -1449,12 +1715,19 @@ def postmatch_grade() -> int:
             "model_probs": model_probs,
             "p_adj_actual_outcome": p_adj_actual,
             "brier": round(brier, 4) if brier is not None else None,
+            "brier_baseline_uniform": round(brier_baseline_uniform, 4),
+            "brier_skill_vs_uniform": brier_skill_vs_uniform,
             "log_loss": round(ll, 4) if ll is not None else None,
             "clv_raw": clv,
+            "clv_ev": clv,
+            "clv_pct": round(clv * 100.0, 2) if clv is not None else None,
+            "clv_unit": "percent_ev_fraction",
             "clv_detail": clv_detail,
+            "clv_positions": clv_positions,
             "audit": audit,
             "match_context_flags": context_flags,
             "scoreline_profile": scoreline_profile,
+            "deep_research_finding_scores": deep_research_findings,
             "closing_odds_snapshot": str(odds_snap[0]) if odds_snap else "",
             "closing_snapshot_captured_at_utc": odds_snap[1].isoformat().replace("+00:00", "Z") if odds_snap else None,
             "closing_snapshot_age_at_kickoff_minutes": closing_snapshot_age_at_kickoff,
@@ -1471,6 +1744,7 @@ def postmatch_grade() -> int:
             "graded_at_utc": graded_at,
         }
         card_changed = write_grading_card(card)
+        removed_cards = remove_superseded_grading_cards(card)
 
         if isinstance(path_c_artifact, dict) and isinstance(path_c_payload, dict):
             ledger_entry = build_path_c_signal_ledger(
@@ -1484,6 +1758,7 @@ def postmatch_grade() -> int:
                 graded_at,
             )
             write_path_c_signal_ledger(ledger_entry)
+            remove_superseded_path_c_ledgers(ledger_entry)
 
         # --- Write Section 11 to report ---
         new_text = text
