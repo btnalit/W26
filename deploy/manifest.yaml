@@ -20,11 +20,14 @@ skill_scripts:
   note: "deploy.sh copies from canonical (skills/), NOT from workspace shim"
 
 shared_scripts:
-  description: "Shared scripts — deployed from canonical path only"
+  description: "Shared scripts/config — deployed from canonical path only"
   canonical_source: "profile/skills/odds-analysis/scripts/"
   targets:
     - dest: "/hermesdata/worldcup-2026-handicap/scripts/cross_book_scan.py"
       note: "deployed from canonical skill version; workspace/scripts/cross_book_scan.py is a shim that imports canonical"
+    - dest: "/hermesdata/worldcup-2026-handicap/config/match-context-overrides.json"
+      from: "profile/config/match-context-overrides.json"
+      note: "manual match-context fallback used only when upstream fixture detail returns no events/incidents"
 
 init_files:
   description: "__init__.py files for package imports"

@@ -1,0 +1,27 @@
+{
+  "schema_version": "wc26.match_context_overrides.v1",
+  "reason": "Manual backfill used only when football-data.org match detail endpoint returns no event/incidents payload.",
+  "matches": {
+    "537327": [
+      {
+        "type": "red_card",
+        "team": "South Africa",
+        "source": "manual_backfill",
+        "note": "football-data detail endpoint returned no events/incidents; operator acceptance requires two RSA red-card flags"
+      },
+      {
+        "type": "red_card",
+        "team": "South Africa",
+        "source": "manual_backfill",
+        "note": "football-data detail endpoint returned no events/incidents; operator acceptance requires two RSA red-card flags"
+      },
+      {
+        "type": "stoppage_winner",
+        "team": "Mexico",
+        "minute": 90,
+        "source": "manual_backfill",
+        "note": "operator acceptance: Mexico stoppage-time event flag"
+      }
+    ]
+  }
+}

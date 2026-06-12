@@ -68,12 +68,17 @@ for f in "$REPO_ROOT"/profile/skills/odds-analysis/scripts/*.py; do
 done
 echo "  deployed $(ls "$SKILL_DEST"/*.py | wc -l) files to ${SKILL_DEST}"
 
-# ── 3. Shared scripts (canonical path only) ──
-echo "--- shared scripts ---"
+# ── 3. Shared scripts and config ──
+echo "--- shared scripts/config ---"
 # cross_book_scan: canonical version from skill scripts
 # (workspace/scripts/cross_book_scan.py is a shim that imports the canonical)
 cp "$SKILL_DEST/cross_book_scan.py" /hermesdata/worldcup-2026-handicap/scripts/cross_book_scan.py
 echo "  deployed: /hermesdata/worldcup-2026-handicap/scripts/cross_book_scan.py (from canonical)"
+mkdir -p /hermesdata/worldcup-2026-handicap/config
+if [ -f "$REPO_ROOT/profile/config/match-context-overrides.json" ]; then
+    cp "$REPO_ROOT/profile/config/match-context-overrides.json" /hermesdata/worldcup-2026-handicap/config/match-context-overrides.json
+    echo "  deployed: /hermesdata/worldcup-2026-handicap/config/match-context-overrides.json"
+fi
 
 # ── 4. __init__.py files ──
 echo "--- __init__.py ---"

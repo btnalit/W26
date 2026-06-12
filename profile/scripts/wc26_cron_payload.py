@@ -27,6 +27,7 @@ WORKSPACE = pathlib.Path(os.environ.get("WC26_WORKSPACE", "/hermesdata/worldcup-
 SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 PYTHON = pathlib.Path(os.environ.get("WC26_PYTHON", str(WORKSPACE / ".venv" / "bin" / "python")))
 ROOT_HERMES_HOME = os.environ.get("WC26_ROOT_HERMES_HOME", "/root/.hermes")
+CONTEXT_OVERRIDES_PATH = pathlib.Path(os.environ.get("WC26_MATCH_CONTEXT_OVERRIDES", str(WORKSPACE / "config" / "match-context-overrides.json")))
 STATE_DIR = WORKSPACE / "state"
 GRADING_DIR = WORKSPACE / "grading"
 GRADING_CARDS_DIR = GRADING_DIR / "cards"
@@ -917,6 +918,32 @@ def enrich_fixture_details(matches: list[dict[str, Any]], token: str) -> dict[st
     return summary
 
 
+def apply_match_context_overrides(matches: list[dict[str, Any]], overrides_path: pathlib.Path = CONTEXT_OVERRIDES_PATH) -> dict[str, Any]:
+    """Apply governed manual context flags when upstream fixture detail has no event payload."""
+    summary = {"path": str(overrides_path), "applied": 0, "missing_file": False}
+    if not overrides_path.exists():
+        summary["missing_file"] = True
+        return summary
+    payload = read_json(overrides_path, {})
+    if not isinstance(payload, dict):
+        return summary
+    by_id = payload.get("matches") if isinstance(payload.get("matches"), dict) else {}
+    for match in matches:
+        if not isinstance(match, dict):
+            continue
+        flags = by_id.get(str(match.get("id")))
+        if not isinstance(flags, list) or not flags:
+            continue
+        has_source_events = any(isinstance(match.get(key), list) and match.get(key) for key in ("events", "incidents"))
+        existing = match.get("match_context_flags") if isinstance(match.get("match_context_flags"), list) else []
+        if has_source_events or existing:
+            continue
+        match["match_context_flags"] = [dict(item) for item in flags if isinstance(item, dict)]
+        if match["match_context_flags"]:
+            summary["applied"] += 1
+    return summary
+
+
 def fixture_collect() -> int:
     if not force_refresh_requested():
         reusable = reusable_snapshot(
@@ -960,9 +987,10 @@ def fixture_collect() -> int:
         data = response.json()
         matches = data.get("matches", []) if isinstance(data, dict) else []
         detail_summary = enrich_fixture_details(matches, token) if isinstance(matches, list) else {"attempted": 0, "merged": 0, "failed": 0, "http_statuses": {}}
+        override_summary = apply_match_context_overrides(matches) if isinstance(matches, list) else {"applied": 0}
         path = WORKSPACE / "snapshots" / "fixtures" / "football-data-wc-matches-latest.json"
-        write_json(path, {"captured_at_utc": utc_now(), "source": "football-data.org", "fixture_detail_source": "football-data.org/v4/matches/{id}", "fixture_detail_summary": detail_summary, "data": data})
-        payload.update(match_count=len(matches), fixture_detail_summary=detail_summary, snapshot_path=str(path))
+        write_json(path, {"captured_at_utc": utc_now(), "source": "football-data.org", "fixture_detail_source": "football-data.org/v4/matches/{id}", "fixture_detail_summary": detail_summary, "match_context_override_summary": override_summary, "data": data})
+        payload.update(match_count=len(matches), fixture_detail_summary=detail_summary, match_context_override_summary=override_summary, snapshot_path=str(path))
     else:
         payload.update(error=response.text[:240], exit_code=1)
     return emit(payload)
