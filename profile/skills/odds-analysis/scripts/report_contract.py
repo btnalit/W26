@@ -43,7 +43,7 @@ DIRECT_REQUIRED_ARTIFACT_CAPABILITIES = {
     "path_c_consistency",
     "mechanism_audit",
 }
-DIRECT_OK_GATE_STATUSES = {"pass", "ok", "complete", "no_signal", "diagnostic"}
+DIRECT_OK_GATE_STATUSES = {"pass", "ok", "complete", "no_signal", "diagnostic", "not_required"}
 DIRECT_SKIPPED_GATE_STATUSES = {"skipped_missing_source", "skipped_not_applicable", "skipped_partial"}
 DIRECT_CAPABILITY_TO_GATE = {
     "devig_1x2": "devig_three_method",
@@ -87,6 +87,25 @@ WINDOW_HOUR_RANGES = {
     "T-75m_team_sheet_checkpoint": (1.0, 1.5),
     "T-60m_lineup_final": (0.75, 1.25),
     "T-45m_price_guard": (0.5, 1.0),
+}
+
+FRESHNESS_TTL_BY_WINDOW = {
+    "T-72h_early": 720,
+    "T-48h_early_update": 720,
+    "T-24h_confirm": 180,
+    "T-6h_preflight": 60,
+    "T-90m_lineup_probe": 30,
+    "T-75m_team_sheet_checkpoint": 30,
+    "T-60m_lineup_final": 30,
+    "T-45m_price_guard": 30,
+}
+
+FRESHNESS_TTL_BY_TIMING_CLASS = {
+    "early_structural": 720,
+    "confirmation": 180,
+    "preflight": 60,
+    "late_lineup_price": 30,
+    "lineup_final": 30,
 }
 
 
@@ -182,6 +201,47 @@ def _validate_timing_window(payload: dict[str, Any], errors: list[str], warnings
         errors.append(f"window_display {declared_display} inconsistent with computed {expected_display}")
     if hours > 84.0 and declared_timing and declared_timing != "early_structural":
         errors.append(f"timing_class {declared_timing} inconsistent with {hours:.1f} hours_to_kickoff; expected early_structural")
+
+
+def _freshness_ttl_minutes(payload: dict[str, Any]) -> tuple[int | None, str]:
+    window = str(payload.get("window", "")).strip()
+    if window in FRESHNESS_TTL_BY_WINDOW:
+        return FRESHNESS_TTL_BY_WINDOW[window], window
+    timing_class = str(payload.get("timing_class", "")).strip()
+    if timing_class in FRESHNESS_TTL_BY_TIMING_CLASS:
+        return FRESHNESS_TTL_BY_TIMING_CLASS[timing_class], timing_class
+    return None, window or timing_class or "unknown"
+
+
+def _freshness_age_minutes(source_freshness: dict[str, Any], entry: dict[str, Any], payload: dict[str, Any]) -> float | None:
+    for key in ("age_minutes", "freshness_minutes", "snapshot_age_minutes"):
+        value = _as_float(entry.get(key))
+        if value is not None:
+            return value
+    for key in ("age_minutes", "freshness_minutes", "snapshot_age_minutes"):
+        value = _as_float(source_freshness.get(key))
+        if value is not None:
+            return value
+    captured = _first_datetime(entry.get("captured_at_utc"), entry.get("captured_at"), source_freshness.get("captured_at_utc"))
+    reference = _first_datetime(payload.get("entry_time_utc"), payload.get("cutoff_utc"), payload.get("generated_at_utc"), payload.get("created_at_utc"))
+    if captured is not None and reference is not None:
+        return max(0.0, (reference - captured).total_seconds() / 60.0)
+    return None
+
+
+def _validate_source_freshness_ttl(payload: dict[str, Any], source_freshness: dict[str, Any], errors: list[str]) -> None:
+    ttl, label = _freshness_ttl_minutes(payload)
+    if ttl is None:
+        return
+    entries = source_freshness.get("sources") or source_freshness.get("snapshots") or []
+    if not isinstance(entries, list):
+        return
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        age = _freshness_age_minutes(source_freshness, entry, payload)
+        if age is not None and age > ttl:
+            errors.append(f"source_freshness stale for {label}: {age:.0f}m > {ttl}m")
 
 
 def resolve_artifact_path(raw_path: str, manifest_path: Path | None) -> Path:
@@ -884,6 +944,8 @@ def _validate_direct_live_contract(
         sources = source_freshness.get("sources") or source_freshness.get("snapshots")
         if not isinstance(sources, list) or not sources:
             errors.append("source_freshness requires non-empty sources/snapshots list")
+        else:
+            _validate_source_freshness_ttl(payload, source_freshness, errors)
 
     gates = payload.get("analysis_gates")
     skipped_by_gate: dict[str, dict[str, Any]] = {}

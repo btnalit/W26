@@ -10,6 +10,8 @@ production environment.
 deploy/
   manifest.yaml   — authoritative file-by-file mapping
   deploy.sh       — runnable script (bash deploy/deploy.sh from repo root)
+  cron-manifest.json — required Hermes scheduler jobs
+  check_cron_manifest.py — deploy-time scheduler assertion
 ```
 
 ## Deployment flow

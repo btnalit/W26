@@ -42,9 +42,12 @@ echo "  backed up to ${BACKUP_DIR}"
 
 # ── 1. Profile scripts ──
 echo "--- profile/scripts ---"
-cp "$REPO_ROOT/profile/scripts/wc26_cron_payload.py" /wc26-profile/wc26_cron_payload.py
-chmod +x /wc26-profile/wc26_cron_payload.py
-echo "  deployed: /wc26-profile/wc26_cron_payload.py"
+mkdir -p /wc26-profile
+for f in "$REPO_ROOT"/profile/scripts/wc26*.py; do
+    cp "$f" "/wc26-profile/$(basename "$f")"
+    chmod +x "/wc26-profile/$(basename "$f")"
+done
+echo "  deployed $(ls /wc26-profile/wc26*.py | wc -l) wc26 profile scripts"
 
 # ── 2. Skill scripts ──
 echo "--- skill scripts ---"
@@ -79,6 +82,11 @@ DEPLOY_LOG="/wc26-backup/DEPLOYED_SHA"
     echo "repo_root: ${REPO_ROOT}"
 } > "$DEPLOY_LOG"
 echo "  wrote: ${DEPLOY_LOG}"
+
+# ── 6. Scheduler manifest assertion ──
+echo "--- cron manifest assertion ---"
+python3 "$REPO_ROOT/deploy/check_cron_manifest.py" --manifest "$REPO_ROOT/deploy/cron-manifest.json"
+echo "  cron registry contains required WC26 jobs"
 
 echo ""
 echo "==> Deploy ${COMMIT_SHA} complete. Verify:"

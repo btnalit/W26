@@ -44,3 +44,14 @@ pre_push_hook:
   description: "CI gate — installed by: cp deploy/pre-push .git/hooks/pre-push && chmod +x"
   file: "deploy/pre-push"
   tests: "97 total (92 existing + 5 CLV math)"
+
+cron_manifest:
+  description: "Hermes scheduler source of truth and deploy-time assertion"
+  source: "deploy/cron-manifest.json"
+  checker: "deploy/check_cron_manifest.py"
+  required_jobs:
+    - wc26-fixture-collect
+    - wc26-match-window-direct
+    - wc26-postmatch-grade
+    - wc26-postmatch-notify
+    - wc26-blocked-recovery

@@ -53,6 +53,25 @@ def test_market_profile_generated_and_sorted():
     assert sortable == sorted(sortable)
 
 
+def test_market_profile_exports_full_score_distribution_for_postmatch_rank():
+    ct = load_module("consistency_triangle_score_distribution", "consistency_triangle.py")
+    result = ct.analyze_consistency(m010_pinnacle())
+    profile = result["market_profile"]
+
+    rows = profile["score_distribution"]
+    assert len(rows) > len(profile["top_scores"])
+    assert any(row["score"] == "2-1" for row in rows)
+    assert all("rank" in row and "tied_rank" in row for row in rows)
+
+
+def test_quarter_total_known_push_aware_answer():
+    ct = load_module("consistency_triangle_known_total", "consistency_triangle.py")
+    matrix = ct.score_matrix(1.85, 0.60, 0.0)
+
+    q = ct.total_settlement_equiv(matrix, 2.25, "over")
+
+    assert abs(q - 0.508) < 0.002
+
 def test_quarter_total_profile_uses_settlement_equiv():
     ct = load_module("consistency_triangle_q", "consistency_triangle.py")
     data = m010_pinnacle()

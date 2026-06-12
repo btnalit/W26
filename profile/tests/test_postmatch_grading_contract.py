@@ -1,0 +1,243 @@
+from __future__ import annotations
+
+import importlib.util
+import json
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def load_payload():
+    path = ROOT / "scripts" / "wc26_cron_payload.py"
+    spec = importlib.util.spec_from_file_location("wc26_cron_payload_postmatch_test", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def write_json(path: Path, payload: dict) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def configure_workspace(module, tmp_path: Path) -> None:
+    module.WORKSPACE = tmp_path
+    module.STATE_DIR = tmp_path / "state"
+    module.GRADING_DIR = tmp_path / "grading"
+    module.GRADING_CARDS_DIR = tmp_path / "grading" / "cards"
+    module.PATH_C_LEDGER_DIR = tmp_path / "grading" / "path_c_signal_ledger"
+
+
+def write_fixture_snapshot(tmp_path: Path, status: str = "FINISHED") -> Path:
+    return write_json(
+        tmp_path / "snapshots" / "fixtures" / "football-data-wc-matches-latest.json",
+        {
+            "captured_at_utc": "2026-06-11T22:00:00Z",
+            "source": "football-data.org",
+            "data": {
+                "matches": [
+                    {
+                        "id": 537327,
+                        "utcDate": "2026-06-11T19:00:00Z",
+                        "status": status,
+                        "homeTeam": {"name": "Mexico", "tla": "MEX"},
+                        "awayTeam": {"name": "South Africa", "tla": "RSA"},
+                        "score": {
+                            "winner": "HOME_TEAM" if status == "FINISHED" else None,
+                            "duration": "REGULAR",
+                            "fullTime": {
+                                "home": 2 if status == "FINISHED" else None,
+                                "away": 0 if status == "FINISHED" else None,
+                            },
+                            "halfTime": {"home": 1 if status == "FINISHED" else None, "away": 0 if status == "FINISHED" else None},
+                        },
+                        "events": [
+                            {"type": "red_card", "team": "South Africa", "minute": 45, "player": "Sithole"},
+                            {"type": "card", "card": "red", "team": {"name": "South Africa"}, "minute": 80, "player": "Zwane"},
+                            {"type": "disallowed_goal", "team": "South Africa", "minute": 77, "player": "Soucek", "reason": "offside"},
+                        ],
+                    }
+                ]
+            },
+        },
+    )
+
+
+def write_odds_snapshot(tmp_path: Path, stem: str, captured_at: str, mexico_price: float) -> Path:
+    return write_json(
+        tmp_path / "snapshots" / "odds" / f"the-odds-api-multibook-{stem}.json",
+        {
+            "captured_at_utc": captured_at,
+            "source": "the-odds-api",
+            "data": [
+                {
+                    "home_team": "Mexico",
+                    "away_team": "South Africa",
+                    "bookmakers": [
+                        {
+                            "key": "pinnacle",
+                            "markets": [
+                                {
+                                    "key": "h2h",
+                                    "outcomes": [
+                                        {"name": "Mexico", "price": mexico_price},
+                                        {"name": "Draw", "price": 4.70},
+                                        {"name": "South Africa", "price": 9.00},
+                                    ],
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+
+def write_report_bundle(tmp_path: Path) -> Path:
+    artifacts_dir = tmp_path / "reports" / "artifacts"
+    devig_path = write_json(
+        artifacts_dir / "devig-M001.json",
+        {
+            "artifact_type": "devig",
+            "artifact_kind": "scalar_market",
+            "decimal_odds": [1.43, 4.70, 9.00],
+            "no_vig_probabilities": [0.6895, 0.2057, 0.1047],
+            "devig_methods": {
+                "shin": [0.6895, 0.2057, 0.1047],
+                "power": [0.6895, 0.2057, 0.1047],
+                "multiplicative": [0.6895, 0.2057, 0.1047],
+            },
+            "survives_all_methods": True,
+        },
+    )
+    path_c_path = write_json(
+        artifacts_dir / "consistency-M001.json",
+        {
+            "artifact_type": "consistency_triangle",
+            "artifact_kind": "consistency_triangle",
+            "signal": {
+                "type": None,
+                "strength": "diagnostic_suppressed",
+                "suppressed": True,
+                "suppress_reason": "wide_spread_poisson_unreliable",
+                "raw_type": "人性税（Under被撑）",
+                "raw_strength": "强",
+                "raw_action": "AH+1X2 反推显示 Totals 市场 Under 被低估",
+                "raw_discrepancy_pp": -15.6,
+            },
+            "discrepancy": {
+                "pp": None,
+                "direction": "under_cheap",
+                "suppressed": True,
+                "suppress_reason": "wide_spread_poisson_unreliable",
+                "raw_pp": -15.6,
+            },
+            "market_profile": {
+                "total_line_lean": {"line": 2.25, "lean": "under"},
+                "score_distribution": [
+                    {"score": "1-0", "home_goals": 1, "away_goals": 0, "prob": 0.1596, "rank": 1, "tied_rank": 1},
+                    {"score": "2-0", "home_goals": 2, "away_goals": 0, "prob": 0.1477, "rank": 2, "tied_rank": 2},
+                ],
+            },
+        },
+    )
+    manifest_path = write_json(
+        artifacts_dir / "manifest-M001.json",
+        {
+            "workflow_contract": "wc26.direct_report.v1",
+            "match_id": "M001",
+            "football_data_id": 537327,
+            "home": "Mexico",
+            "away": "South Africa",
+            "mode": "live",
+            "source_quality": "B",
+            "final_status": "watch",
+            "window": "T-60m_lineup_final",
+            "timing_class": "lineup_final",
+            "source_freshness": {"snapshots": [{"source": "the-odds-api", "captured_at_utc": "2026-06-11T18:00:00Z", "age_minutes": 60}]},
+            "analysis_gates": {"source_freshness": "pass"},
+            "artifacts": [
+                {"artifact_id": "devig:M001", "artifact_type": "devig", "path": str(devig_path), "provides": ["devig_1x2"]},
+                {"artifact_id": "pathc:M001", "artifact_type": "consistency_triangle", "path": str(path_c_path), "provides": ["path_c_consistency"]},
+            ],
+        },
+    )
+    report_path = tmp_path / "reports" / "match" / "M001-MEX-RSA-T-60m.md"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(
+        "\n".join(
+            [
+                "# WC26 M001 Mexico vs South Africa - T-60m_lineup_final Handicap Report",
+                "",
+                "mode: live",
+                "match_id: M001",
+                "window: T-60m_lineup_final",
+                "timing_class: lineup_final",
+                "entry_price: null",
+                f"artifact_manifest_path: {manifest_path}",
+                "final_status: watch",
+                "",
+                "Mexico vs South Africa",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return report_path
+
+
+def test_postmatch_grade_uses_pre_kickoff_close_and_writes_context_score_and_path_c_ledger(tmp_path: Path, monkeypatch, capsys) -> None:
+    module = load_payload()
+    configure_workspace(module, tmp_path)
+    monkeypatch.setenv("WC26_NOW_UTC", "2026-06-11T22:30:00Z")
+    write_fixture_snapshot(tmp_path)
+    pre = write_odds_snapshot(tmp_path, "20260611T160000Z", "2026-06-11T16:00:00Z", 1.43)
+    write_odds_snapshot(tmp_path, "20260611T213000Z", "2026-06-11T21:30:00Z", 99.0)
+    write_report_bundle(tmp_path)
+
+    assert module.postmatch_grade() == 0
+    out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert out["status"] == "ok"
+
+    cards = sorted((tmp_path / "grading" / "cards").glob("*.json"))
+    assert len(cards) == 1
+    card = json.loads(cards[0].read_text(encoding="utf-8"))
+    assert card["idempotency_key"] == "M001:T-60m_lineup_final"
+    assert card["closing_odds_snapshot"] == str(pre)
+    assert card["closing_snapshot_age_at_kickoff_minutes"] == 180
+    assert card["closing_quality"] == "degraded"
+    assert {flag["type"] for flag in card["match_context_flags"]} >= {"red_card", "disallowed_goal"}
+    assert card["scoreline_profile"]["actual_score"] == "2-0"
+    assert card["scoreline_profile"]["rank"] == 2
+
+    ledger_files = sorted((tmp_path / "grading" / "path_c_signal_ledger").glob("*.json"))
+    assert len(ledger_files) == 1
+    ledger = json.loads(ledger_files[0].read_text(encoding="utf-8"))
+    assert ledger["suppressed"] is True
+    assert ledger["direction"] == "under_cheap"
+    assert ledger["outcome_agrees"] is True
+    assert ledger["pp_band"] == "ge15"
+
+    assert module.postmatch_grade() == 0
+    capsys.readouterr()
+    assert len(list((tmp_path / "grading" / "cards").glob("*.json"))) == 1
+    assert len(list((tmp_path / "grading" / "path_c_signal_ledger").glob("*.json"))) == 1
+
+
+def test_postmatch_grade_blocks_stale_fixture_snapshot_after_kickoff(tmp_path: Path, monkeypatch, capsys) -> None:
+    module = load_payload()
+    configure_workspace(module, tmp_path)
+    monkeypatch.setenv("WC26_NOW_UTC", "2026-06-12T00:45:00Z")
+    path = write_fixture_snapshot(tmp_path, status="TIMED")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["captured_at_utc"] = "2026-06-11T10:00:00Z"
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    assert module.postmatch_grade() == 2
+    out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert out["status"] == "blocked_stale_fixture_snapshot"
+    assert out["stale_match_count"] == 1
+    assert out["required_action"] == "run wc26-fixture-collect with WC26_FORCE_REFRESH=1 before grading"

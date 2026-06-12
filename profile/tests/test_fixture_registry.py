@@ -125,6 +125,22 @@ def test_fixture_registry_detects_m_id_team_mismatch(tmp_path: Path) -> None:
     assert "M003 maps to Australia vs Turkey" in " ".join(result["errors"])
 
 
+def test_fixture_registry_rejects_noncanonical_local_match_id(tmp_path: Path) -> None:
+    cache = write_fixture_cache(tmp_path / "fixtures.json")
+    registry = fixture_registry.load_registry(cache)
+
+    result = fixture_registry.validate_identity(
+        registry,
+        {
+            "match_id": "KOR-CZE",
+            "football_data_id": 537334,
+            "match": {"home": "Qatar", "away": "Switzerland"},
+        },
+    )
+
+    assert result["valid"] is False
+    assert "match_id must use local canonical format M0xx" in " ".join(result["errors"])
+
 def test_report_guard_rejects_fixture_identity_mismatch(tmp_path: Path) -> None:
     workspace = tmp_path
     cache = write_fixture_cache(workspace / "snapshots" / "fixtures" / "football-data-wc-matches-latest.json")

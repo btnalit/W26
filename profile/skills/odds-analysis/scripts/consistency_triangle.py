@@ -403,9 +403,14 @@ def build_market_profile(
         top_margin_label = f"{away_name} 净胜{abs(top_margin_value)}"
 
     score_rows.sort(key=lambda item: (-item["prob"], item["home_goals"], item["away_goals"]))
-    top_scores = []
-    for row in score_rows[:6]:
-        top_scores.append(
+    score_distribution = []
+    tied_rank = 1
+    previous_prob = None
+    for index, row in enumerate(score_rows, 1):
+        if previous_prob is None or abs(row["prob"] - previous_prob) > 1e-12:
+            tied_rank = index
+            previous_prob = row["prob"]
+        score_distribution.append(
             {
                 "score": row["score"],
                 "home_goals": row["home_goals"],
@@ -413,8 +418,14 @@ def build_market_profile(
                 "prob": _prob(row["prob"]),
                 "prob_pct": _pct(row["prob"]),
                 "fair_odds": row["fair_odds"],
+                "rank": index,
+                "tied_rank": tied_rank,
             }
         )
+    top_scores = [
+        {key: row[key] for key in ("score", "home_goals", "away_goals", "prob", "prob_pct", "fair_odds")}
+        for row in score_distribution[:6]
+    ]
 
     base.update(
         {
@@ -458,6 +469,7 @@ def build_market_profile(
                 "lean": "yes" if btts_yes >= 0.5 else "no",
             },
             "top_scores": top_scores,
+            "score_distribution": score_distribution,
         }
     )
     return base

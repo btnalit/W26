@@ -682,6 +682,20 @@ def test_report_contract_accepts_early_structural_before_t72(tmp_path: Path) -> 
     assert "window" not in " ".join(result["errors"])
 
 
+def test_report_contract_rejects_lineup_final_stale_source_freshness(tmp_path: Path) -> None:
+    _request_path, manifest_path, _report_path = write_relay_ready_direct_fixture(tmp_path, "completed_cached")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["window"] = "T-60m_lineup_final"
+    manifest["timing_class"] = "lineup_final"
+    manifest["entry_time_utc"] = "2026-06-11T18:00:00Z"
+    manifest["match"]["kickoff_utc"] = "2026-06-11T19:00:00Z"
+    manifest["source_freshness"] = {"snapshots": [{"source": "the-odds-api", "captured_at_utc": "2026-06-11T16:00:49Z", "age_minutes": 131}]}
+
+    result = report_contract.validate_manifest(manifest, manifest_path)
+
+    assert result["valid"] is False
+    assert "source_freshness stale for T-60m_lineup_final" in " ".join(result["errors"])
+
 def test_report_guard_rejects_partial_source_quality_cap_mismatch(tmp_path: Path) -> None:
     _request_path, manifest_path, report_path = write_relay_ready_direct_fixture(tmp_path, "completed_cached")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))

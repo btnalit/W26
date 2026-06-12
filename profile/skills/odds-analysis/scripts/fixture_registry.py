@@ -11,12 +11,16 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import unicodedata
 from pathlib import Path
 from typing import Any
 
 
 DEFAULT_FIXTURE_PATH = Path("/hermesdata/worldcup-2026-handicap/snapshots/fixtures/football-data-wc-matches-latest.json")
+LOCAL_MATCH_ID_RE = re.compile(r"^M\d{3}$")
+
+
 DEFAULT_VENUE_OVERRIDES_PATH = Path(
     os.environ.get(
         "WC26_VENUE_OVERRIDES_PATH",
@@ -168,9 +172,12 @@ def validate_identity(registry: dict[str, Any], payload: dict[str, Any]) -> dict
     canonical_entry = None
     match_id = str(identity.get("match_id") or "").upper()
     if match_id:
-        local_entry = registry["by_local_id"].get(match_id)
-        if local_entry is None:
-            errors.append(f"match_id {match_id} not found in fixture registry")
+        if not LOCAL_MATCH_ID_RE.fullmatch(match_id):
+            errors.append("match_id must use local canonical format M0xx")
+        else:
+            local_entry = registry["by_local_id"].get(match_id)
+            if local_entry is None:
+                errors.append(f"match_id {match_id} not found in fixture registry")
 
     football_data_id = identity.get("football_data_id")
     if football_data_id not in (None, ""):

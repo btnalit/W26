@@ -1,0 +1,53 @@
+{
+  "schema_version": "wc26.cron_manifest.v1",
+  "jobs": [
+    {
+      "name": "wc26-fixture-collect",
+      "script": "wc26-fixture-collect.py",
+      "required": true,
+      "schedule": "postmatch settlement watcher: KO+110m, KO+130m, then every 30m until FINISHED",
+      "deliver": "local",
+      "mode": "no-agent",
+      "env": {
+        "WC26_FORCE_REFRESH": "1",
+        "WC26_FIXTURE_TTL_MINUTES": "0"
+      }
+    },
+    {
+      "name": "wc26-match-window-direct",
+      "script": "wc26-match-window-direct.py",
+      "required": true,
+      "schedule": "*/15 * * * *",
+      "deliver": "telegram",
+      "mode": "agent",
+      "env": {}
+    },
+    {
+      "name": "wc26-postmatch-grade",
+      "script": "wc26-postmatch-grade.py",
+      "required": true,
+      "schedule": "after fixture refresh reports FINISHED",
+      "deliver": "local",
+      "mode": "no-agent",
+      "env": {}
+    },
+    {
+      "name": "wc26-postmatch-notify",
+      "script": "wc26-postmatch-notify.py",
+      "required": true,
+      "schedule": "after wc26-postmatch-grade writes cards",
+      "deliver": "telegram",
+      "mode": "agent",
+      "env": {}
+    },
+    {
+      "name": "wc26-blocked-recovery",
+      "script": "wc26-blocked-recovery.py",
+      "required": true,
+      "schedule": "*/30 * * * *",
+      "deliver": "local",
+      "mode": "no-agent",
+      "env": {}
+    }
+  ]
+}

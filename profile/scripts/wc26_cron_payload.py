@@ -17,7 +17,7 @@ import sys
 import importlib.util
 import hashlib
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import requests
@@ -30,6 +30,7 @@ ROOT_HERMES_HOME = os.environ.get("WC26_ROOT_HERMES_HOME", "/root/.hermes")
 STATE_DIR = WORKSPACE / "state"
 GRADING_DIR = WORKSPACE / "grading"
 GRADING_CARDS_DIR = GRADING_DIR / "cards"
+PATH_C_LEDGER_DIR = GRADING_DIR / "path_c_signal_ledger"
 
 
 WINDOW_SPECS = [
@@ -463,6 +464,282 @@ def write_grading_card(card: dict[str, Any]) -> bool:
     return True
 
 
+
+
+def path_c_signal_ledger_path(signal_id: str) -> pathlib.Path:
+    return PATH_C_LEDGER_DIR / f"{signal_id}.json"
+
+
+def write_path_c_signal_ledger(entry: dict[str, Any]) -> bool:
+    path = path_c_signal_ledger_path(str(entry["signal_id"]))
+    existing = read_json(path, None) if path.exists() else None
+    if isinstance(existing, dict) and existing.get("content_hash") == entry.get("content_hash"):
+        return False
+    write_json(path, entry)
+    return True
+
+
+def canonical_match_id_for_fixture(fm: dict[str, Any], fallback: str, fixture_path: pathlib.Path) -> str:
+    fallback = str(fallback or "").strip().upper()
+    if re.fullmatch(r"M\d{3}", fallback):
+        return fallback
+    try:
+        registry = FIXTURE_REGISTRY.load_registry(fixture_path)
+        entry = FIXTURE_REGISTRY.resolve_fixture(registry, football_data_id=fm.get("id"))
+        local_id = str(entry.get("local_ordinal_id") or "").strip().upper()
+        if re.fullmatch(r"M\d{3}", local_id):
+            return local_id
+    except Exception:
+        pass
+    return fallback
+
+
+def _event_team(value: Any) -> str | None:
+    if isinstance(value, dict):
+        return str(value.get("name") or value.get("team") or "").strip() or None
+    if isinstance(value, str):
+        return value.strip() or None
+    return None
+
+
+def _event_minute(event: dict[str, Any]) -> int | None:
+    for key in ("minute", "elapsed"):
+        value = event.get(key)
+        if value not in (None, ""):
+            try:
+                return int(value)
+            except Exception:
+                pass
+    time_payload = event.get("time") if isinstance(event.get("time"), dict) else {}
+    value = time_payload.get("elapsed")
+    try:
+        return int(value) if value not in (None, "") else None
+    except Exception:
+        return None
+
+
+def _clean_flag(payload: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in payload.items() if value not in (None, "", [])}
+
+
+def extract_match_context_flags(fm: dict[str, Any], score_h: int, score_a: int) -> list[dict[str, Any]]:
+    flags: list[dict[str, Any]] = []
+    existing = fm.get("match_context_flags")
+    if isinstance(existing, list):
+        for item in existing:
+            if isinstance(item, dict) and item.get("type"):
+                flags.append(_clean_flag(dict(item)))
+
+    events: list[dict[str, Any]] = []
+    for key in ("events", "incidents"):
+        raw = fm.get(key)
+        if isinstance(raw, list):
+            events.extend(item for item in raw if isinstance(item, dict))
+
+    for event in events:
+        type_text = " ".join(str(event.get(key, "")) for key in ("type", "detail", "event_type", "incidentType")).lower()
+        card_text = " ".join(str(event.get(key, "")) for key in ("card", "card_type", "cardType")).lower()
+        team = _event_team(event.get("team")) or _event_team(event.get("side"))
+        minute = _event_minute(event)
+        player = str(event.get("player") or event.get("player_name") or event.get("name") or "").strip() or None
+        reason = str(event.get("reason") or event.get("var_reason") or "").strip() or None
+        if "red" in type_text or "red" in card_text:
+            flags.append(_clean_flag({"type": "red_card", "team": team, "minute": minute, "player": player, "reason": reason}))
+        elif "disallowed" in type_text or (reason is not None and "offside" in reason.lower()):
+            flags.append(_clean_flag({"type": "disallowed_goal", "team": team, "minute": minute, "player": player, "reason": reason}))
+        elif "penalty" in type_text:
+            flags.append(_clean_flag({"type": "penalty", "team": team, "minute": minute, "player": player, "reason": reason}))
+        elif "goal" in type_text and minute is not None and minute >= 90 and abs(int(score_h) - int(score_a)) == 1:
+            flags.append(_clean_flag({"type": "stoppage_winner", "team": team, "minute": minute, "player": player}))
+
+    deduped: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for flag in flags:
+        key = json.dumps(flag, ensure_ascii=False, sort_keys=True)
+        if key not in seen:
+            seen.add(key)
+            deduped.append(flag)
+    return deduped
+
+
+def artifact_payload_by_capability(
+    manifest_payload: dict[str, Any],
+    manifest_path: pathlib.Path | None,
+    capability: str,
+) -> tuple[Any, Any]:
+    for artifact in manifest_payload.get("artifacts", []):
+        if not isinstance(artifact, dict) or capability not in artifact_caps(artifact):
+            continue
+        payload = load_artifact_payload(artifact, manifest_path)
+        if isinstance(payload, dict):
+            return artifact, payload
+    return None, None
+
+
+def scoreline_profile_from_path_c(path_c_payload: dict[str, Any] | None, actual_score: str) -> dict[str, Any]:
+    result = {"actual_score": actual_score, "prob": None, "prob_pct": None, "rank": None, "tied_rank": None, "source": "missing"}
+    if not isinstance(path_c_payload, dict):
+        return result
+    profile = path_c_payload.get("market_profile") if isinstance(path_c_payload.get("market_profile"), dict) else {}
+    rows = profile.get("score_distribution") if isinstance(profile.get("score_distribution"), list) else None
+    source = "score_distribution"
+    if rows is None:
+        rows = profile.get("top_scores") if isinstance(profile.get("top_scores"), list) else []
+        source = "top_scores"
+    for index, row in enumerate(rows, 1):
+        if not isinstance(row, dict) or str(row.get("score")) != actual_score:
+            continue
+        rank = row.get("rank") if row.get("rank") is not None else index
+        tied_rank = row.get("tied_rank") if row.get("tied_rank") is not None else rank
+        return {
+            "actual_score": actual_score,
+            "prob": row.get("prob"),
+            "prob_pct": row.get("prob_pct"),
+            "rank": rank,
+            "tied_rank": tied_rank,
+            "fair_odds": row.get("fair_odds"),
+            "source": source,
+        }
+    return result
+
+
+def total_settlement_score(total_goals: int, line: float, side: str) -> float:
+    doubled = round(float(line) * 2)
+    if abs(float(line) * 2 - doubled) < 1e-9:
+        legs = [float(line)]
+    else:
+        legs = [math.floor(float(line) * 2) / 2.0, math.ceil(float(line) * 2) / 2.0]
+    scores = []
+    for leg in legs:
+        if side == "over":
+            scores.append(1.0 if total_goals > leg else (0.5 if total_goals == leg else 0.0))
+        else:
+            scores.append(1.0 if total_goals < leg else (0.5 if total_goals == leg else 0.0))
+    return sum(scores) / len(scores) if scores else 0.0
+
+
+def signal_pp_band(value: float | None) -> str | None:
+    if value is None:
+        return None
+    pp = abs(value)
+    if pp < 5:
+        return "lt5"
+    if pp < 10:
+        return "5_10"
+    if pp < 15:
+        return "10_15"
+    return "ge15"
+
+
+def path_c_outcome_agrees(path_c_payload: dict[str, Any], score_h: int, score_a: int) -> bool | None:
+    discrepancy = path_c_payload.get("discrepancy") if isinstance(path_c_payload.get("discrepancy"), dict) else {}
+    signal = path_c_payload.get("signal") if isinstance(path_c_payload.get("signal"), dict) else {}
+    direction = str(discrepancy.get("direction") or signal.get("direction") or "").strip().lower()
+    profile = path_c_payload.get("market_profile") if isinstance(path_c_payload.get("market_profile"), dict) else {}
+    total_lean = profile.get("total_line_lean") if isinstance(profile.get("total_line_lean"), dict) else {}
+    line = numeric_or_none(total_lean.get("line") or discrepancy.get("line"))
+    if line is None or direction not in {"under_cheap", "over_cheap"}:
+        return None
+    side = "under" if direction == "under_cheap" else "over"
+    settlement = total_settlement_score(int(score_h) + int(score_a), line, side)
+    if settlement > 0.5:
+        return True
+    if settlement < 0.5:
+        return False
+    return None
+
+
+def build_path_c_signal_ledger(
+    artifact: dict[str, Any],
+    path_c_payload: dict[str, Any],
+    match_id: str,
+    window: str,
+    result_str: str,
+    score_h: int,
+    score_a: int,
+    graded_at: str,
+) -> dict[str, Any]:
+    signal = path_c_payload.get("signal") if isinstance(path_c_payload.get("signal"), dict) else {}
+    discrepancy = path_c_payload.get("discrepancy") if isinstance(path_c_payload.get("discrepancy"), dict) else {}
+    raw_pp = numeric_or_none(discrepancy.get("raw_pp"))
+    pp = numeric_or_none(discrepancy.get("pp"))
+    signal_pp = pp if pp is not None else numeric_or_none(signal.get("raw_discrepancy_pp"))
+    if signal_pp is None:
+        signal_pp = raw_pp
+    direction = str(discrepancy.get("direction") or signal.get("direction") or "").strip() or None
+    signal_id = "pathc-" + stable_hash([match_id, window, artifact.get("artifact_id"), result_str])
+    core = {
+        "schema_version": "wc26.path_c_signal_ledger.v1",
+        "signal_id": signal_id,
+        "match_id": match_id,
+        "window": window,
+        "artifact_id": artifact.get("artifact_id"),
+        "actual_score": result_str,
+        "actual_total_goals": int(score_h) + int(score_a),
+        "signal_type": signal.get("type"),
+        "raw_type": signal.get("raw_type"),
+        "strength": signal.get("strength"),
+        "raw_strength": signal.get("raw_strength"),
+        "direction": direction,
+        "pp": pp,
+        "raw_pp": raw_pp,
+        "signal_pp": signal_pp,
+        "pp_band": signal_pp_band(signal_pp),
+        "suppressed": bool(signal.get("suppressed") or discrepancy.get("suppressed")),
+        "suppress_reason": signal.get("suppress_reason") or discrepancy.get("suppress_reason"),
+        "outcome_agrees": path_c_outcome_agrees(path_c_payload, score_h, score_a),
+        "graded_at_utc": graded_at,
+    }
+    return {**core, "content_hash": stable_hash(core)}
+
+
+def closing_odds_snapshot_for_kickoff(kickoff: datetime | None) -> tuple[pathlib.Path, datetime] | None:
+    if kickoff is None:
+        return latest_snapshot(WORKSPACE / "snapshots" / "odds", ["the-odds-api-*.json"])
+    candidates: list[tuple[pathlib.Path, datetime]] = []
+    for path in (WORKSPACE / "snapshots" / "odds").glob("the-odds-api-*.json"):
+        if not path.is_file():
+            continue
+        captured = snapshot_time(path)
+        if captured is not None and captured < kickoff:
+            candidates.append((path, captured))
+    return max(candidates, key=lambda item: item[1]) if candidates else None
+
+
+def closing_odds_by_match(snapshot: tuple[pathlib.Path, datetime] | None) -> dict[str, Any]:
+    if not snapshot:
+        return {}
+    odds_data = json.loads(snapshot[0].read_text())
+    odds_list = odds_data if isinstance(odds_data, list) else odds_data.get("data", [])
+    closing_odds: dict[str, Any] = {}
+    for om in odds_list:
+        key = f"{om.get('home_team','')}_{om.get('away_team','')}".lower().replace(" ", "")
+        closing_odds[key] = om
+    return closing_odds
+
+
+def stale_postmatch_fixture_records(all_matches: list[dict[str, Any]], fixture_captured: datetime) -> list[dict[str, Any]]:
+    grace = int(os.environ.get("WC26_POSTMATCH_FIXTURE_GRACE_MINUTES", "120"))
+    now = current_time()
+    stale: list[dict[str, Any]] = []
+    for fm in all_matches:
+        status = str(fm.get("status", fm.get("stage", "")))
+        if status in {"FINISHED", "AWARDED"}:
+            continue
+        kickoff = parse_snapshot_time(str(fm.get("utcDate") or fm.get("kickoff_utc") or ""))
+        if kickoff is None:
+            continue
+        if now >= kickoff + timedelta(minutes=grace) and fixture_captured < kickoff:
+            stale.append(
+                {
+                    "football_data_id": fm.get("id"),
+                    "home": (fm.get("homeTeam") or {}).get("name"),
+                    "away": (fm.get("awayTeam") or {}).get("name"),
+                    "kickoff_utc": kickoff.isoformat().replace("+00:00", "Z"),
+                    "status": status,
+                }
+            )
+    return stale
 def proposal_summaries(today: str) -> tuple[list[pathlib.Path], list[pathlib.Path]]:
     proposals_dir = WORKSPACE / "proposals"
     proposals = sorted(proposals_dir.glob("*.md")) if proposals_dir.exists() else []
@@ -796,9 +1073,9 @@ def postmatch_grade() -> int:
 
     For each report where the match has finished:
       1. Fetch actual result from football-data fixture snapshot
-      2. Fetch closing odds from latest the-odds-api snapshot
+      2. Fetch closing odds from the last pre-kickoff the-odds-api snapshot
       3. Read report entry prices from report frontmatter
-      4. Compute CLV: (entry_no_vig - closing_no_vig) / closing_no_vig
+      4. Compute CLV: entry_odds × closing_fair_prob − 1
       5. Compute L1: model Brier/log-loss vs actual result
       6. L2 audit: decision consistency
       7. Write Section 11 to report .md
@@ -816,18 +1093,19 @@ def postmatch_grade() -> int:
     all_matches = fixtures.get("data", {}).get("matches",
                    fixtures.get("matches", []))
 
-    # --- Load odds snapshot for closing prices ---
-    odds_snap = latest_snapshot(
-        WORKSPACE / "snapshots" / "odds",
-        ["the-odds-api-*.json"],
-    )
-    closing_odds = {}
-    if odds_snap:
-        odds_data = json.loads(odds_snap[0].read_text())
-        odds_list = odds_data if isinstance(odds_data, list) else odds_data.get("data", [])
-        for om in odds_list:
-            key = f"{om.get('home_team','')}_{om.get('away_team','')}".lower().replace(" ","")
-            closing_odds[key] = om
+
+    stale_records = stale_postmatch_fixture_records(all_matches, fixture_snap[1])
+    if stale_records and not any(str(fm.get("status", fm.get("stage", ""))) in {"FINISHED", "AWARDED"} for fm in all_matches):
+        return emit(manifest(
+            "wc26-postmatch-grade",
+            "blocked_stale_fixture_snapshot",
+            exit_code=2,
+            stale_match_count=len(stale_records),
+            stale_matches=stale_records[:10],
+            fixture_snapshot=str(fixture_snap[0]),
+            fixture_captured_at_utc=fixture_snap[1].isoformat().replace("+00:00", "Z"),
+            required_action="run wc26-fixture-collect with WC26_FORCE_REFRESH=1 before grading",
+        ))
 
     # --- Load all reports ---
     reports_dir = WORKSPACE / "reports" / "match"
@@ -854,6 +1132,18 @@ def postmatch_grade() -> int:
         result_str = f"{score_h}-{score_a}"
         actual_margin = int(score_h or 0) - int(score_a or 0)
         actual_vec = [1,0,0] if score_h > score_a else ([0,1,0] if score_h == score_a else [0,0,1])
+
+        kickoff = parse_snapshot_time(str(fm.get("utcDate") or ""))
+        odds_snap = closing_odds_snapshot_for_kickoff(kickoff)
+        closing_odds = closing_odds_by_match(odds_snap)
+        closing_snapshot_age_at_kickoff = None
+        closing_quality = "missing"
+        if odds_snap and kickoff is not None:
+            closing_snapshot_age_at_kickoff = round((kickoff - odds_snap[1]).total_seconds() / 60)
+            max_age = int(os.environ.get("WC26_CLOSING_MAX_AGE_MINUTES", "90"))
+            closing_quality = "ok" if closing_snapshot_age_at_kickoff <= max_age else "degraded"
+        elif odds_snap:
+            closing_quality = "unknown"
 
         # Find matching report
         report_path = None
@@ -1008,6 +1298,14 @@ def postmatch_grade() -> int:
             audit.append("L2: CLV positive — entry price beat the closing market")
         audit.append(f"L2: final_status={fs}, result={result_str}, CLV={clv}")
 
+
+        raw_match_id = report_field(text, "match_id", manifest_match_id(report_manifest))
+        match_id_value = canonical_match_id_for_fixture(fm, raw_match_id, fixture_snap[0])
+        window_value = report_field(text, "window", manifest_window(report_manifest))
+        context_flags = extract_match_context_flags(fm, int(score_h), int(score_a))
+        path_c_artifact, path_c_payload = artifact_payload_by_capability(report_manifest, report_manifest_path, "path_c_consistency")
+        scoreline_profile = scoreline_profile_from_path_c(path_c_payload, result_str)
+
         # --- Build Section 11 text ---
         graded_at = utc_now()
         brier_line = f"{brier:.4f}" if brier is not None else "N/A"
@@ -1039,10 +1337,15 @@ def postmatch_grade() -> int:
             section_11 += f"\n- {a}"
 
         section_11 += f"""
+**Context Flags:** {json.dumps(context_flags, ensure_ascii=False) if context_flags else "[]"}
+
+**Scoreline Profile:** {json.dumps(scoreline_profile, ensure_ascii=False)}
+
 **Lesson:** (to be filled by owner)
 
 **CLV_by_timing_class:** N/A (auto-postmatch)
 """  # noqa: E501
+
 
         content_core = {
             "schema_version": "wc26.grading_card.v1",
@@ -1055,8 +1358,10 @@ def postmatch_grade() -> int:
             "report_path": str(report_path),
             "report_mtime_utc": report_mtime.isoformat().replace("+00:00", "Z"),
             "manifest_path": str(report_manifest_path) if report_manifest_path else "",
-            "match_id": report_field(text, "match_id", manifest_match_id(report_manifest)),
-            "window": report_field(text, "window", manifest_window(report_manifest)),
+            "match_id": match_id_value,
+            "raw_match_id": raw_match_id,
+            "window": window_value,
+            "idempotency_key": f"{match_id_value}:{window_value}",
             "timing_class": report_field(text, "timing_class", str(report_manifest.get("timing_class") or "")),
             "source_quality_cap": report_field(text, "source_quality_cap", str(report_manifest.get("source_quality_cap") or report_manifest.get("source_quality") or "")),
             "final_status": fs,
@@ -1068,10 +1373,15 @@ def postmatch_grade() -> int:
             "clv_raw": clv,
             "clv_detail": clv_detail,
             "audit": audit,
+            "match_context_flags": context_flags,
+            "scoreline_profile": scoreline_profile,
             "closing_odds_snapshot": str(odds_snap[0]) if odds_snap else "",
+            "closing_snapshot_captured_at_utc": odds_snap[1].isoformat().replace("+00:00", "Z") if odds_snap else None,
+            "closing_snapshot_age_at_kickoff_minutes": closing_snapshot_age_at_kickoff,
+            "closing_quality": closing_quality,
             "fixture_snapshot": str(fixture_snap[0]),
         }
-        card_id = "grade-" + stable_hash([fm.get("id"), str(report_path)])
+        card_id = "grade-" + stable_hash([match_id_value, window_value])
         content_hash = stable_hash(content_core)
         card = {
             **content_core,
@@ -1080,6 +1390,19 @@ def postmatch_grade() -> int:
             "graded_at_utc": graded_at,
         }
         card_changed = write_grading_card(card)
+
+        if isinstance(path_c_artifact, dict) and isinstance(path_c_payload, dict):
+            ledger_entry = build_path_c_signal_ledger(
+                path_c_artifact,
+                path_c_payload,
+                match_id_value,
+                window_value,
+                result_str,
+                int(score_h),
+                int(score_a),
+                graded_at,
+            )
+            write_path_c_signal_ledger(ledger_entry)
 
         # --- Write Section 11 to report ---
         new_text = text

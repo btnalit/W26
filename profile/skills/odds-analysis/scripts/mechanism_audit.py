@@ -210,6 +210,24 @@ def path_b_mechanism(manifest: dict[str, Any], artifacts: dict[str, tuple[dict[s
         if isinstance(raw_cal, dict):
             calibration = raw_cal.get("calibration_status") or raw_cal.get("status")
         calibration = calibration or model_payload.get("calibration_status")
+    if status in {"not_required", "skipped_not_applicable"}:
+        return (
+            {
+                "status": "COMPLETE",
+                "required_for_complete": False,
+                "gate_status": status,
+                "calibration_status": calibration,
+                "reason": "path_b_model_diagnostic explicitly not required for this report",
+            },
+            [
+                {
+                    "source": "path_b_model_diagnostic",
+                    "subject": "model probability vs market",
+                    "decision": "DIAGNOSTIC_ONLY",
+                    "evidence": f"gate_status={status}; no model-derived adjustment is required",
+                }
+            ],
+        )
     if status in {"pass", "ok", "complete", "diagnostic", "no_signal"}:
         return (
             {
@@ -269,6 +287,8 @@ def path_c_mechanism(artifacts: dict[str, tuple[dict[str, Any], dict[str, Any] |
     decision = "CONFIRMED_NOISE"
     if signal.get("actionable") is True:
         decision = "CONFIRMED_ACTIONABLE"
+    elif signal.get("suppressed") is True or discrepancy.get("suppressed") is True or str(signal.get("strength", "")).lower() == "diagnostic_suppressed":
+        decision = "DIAGNOSTIC_ONLY"
     elif signal.get("type") in (None, "", "none"):
         decision = "REFUTED"
     return (
