@@ -6,12 +6,14 @@
       {
         "type": "red_card",
         "team": "South Africa",
+        "sequence": 1,
         "source": "manual_backfill",
         "note": "football-data detail endpoint returned no events/incidents; operator acceptance requires two RSA red-card flags"
       },
       {
         "type": "red_card",
         "team": "South Africa",
+        "sequence": 2,
         "source": "manual_backfill",
         "note": "football-data detail endpoint returned no events/incidents; operator acceptance requires two RSA red-card flags"
       },
