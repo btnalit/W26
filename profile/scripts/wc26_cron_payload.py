@@ -44,9 +44,12 @@ WINDOW_SPECS = [
 # ── Late-window fixtures trigger forced odds refresh ──
 # T-60m and T-45m windows exist solely to capture the latest price.
 # Reusing a cached snapshot defeats their purpose.  When any fixture
-# is inside the late-window range (0.5–1.25 h to kickoff), the odds
+# is inside the late-window range (0–1.25 h to kickoff), the odds
 # collector must skip TTL reuse and always fetch fresh prices.
-LATE_WINDOW_HOURS_LO = 0.5
+# LO=0 ensures that even ad-hoc analyses inside T-30m (e.g. triggered
+# by breaking news) get a fresh snapshot rather than falling back to
+# TTL reuse.
+LATE_WINDOW_HOURS_LO = 0.0
 LATE_WINDOW_HOURS_HI = 1.25
 
 
@@ -224,11 +227,12 @@ def hours_to_kickoff(entry: dict[str, Any], now: datetime | None = None) -> floa
 
 
 def has_late_window_fixtures(now: datetime | None = None) -> bool:
-    """Return True if any fixture is in T-60m or T-45m late window.
+    """Return True if any fixture is 0–1.25 h from kickoff.
 
     These windows exist solely to capture the latest price.  When a
-    fixture is 0.5–1.25 hours from kickoff, every odds snapshot must
-    be fresh — cached reuse is not acceptable.
+    fixture is within 75 minutes of KO, every odds snapshot must be
+    fresh — cached reuse is not acceptable.  LO=0 covers ad-hoc
+    analyses triggered inside T-30m (e.g. breaking news).
     """
     now = now or current_time()
     for entry in fixture_entries():

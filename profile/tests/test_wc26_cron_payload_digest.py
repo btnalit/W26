@@ -154,3 +154,132 @@ def test_postmatch_notify_sends_each_grading_card_once(tmp_path: Path, capsys) -
     assert module.postmatch_notify() == 0
     second = capsys.readouterr().out
     assert second == ""
+
+
+def _write_fixture_file(workspace: Path, match_id: int, kickoff_utc: str, home: str = "TestHome", away: str = "TestAway") -> Path:
+    """Helper: write a minimal fixture snapshot with one match."""
+    fixture_path = workspace / "snapshots" / "fixtures" / "football-data-wc-matches-latest.json"
+    fixture_path.parent.mkdir(parents=True, exist_ok=True)
+    fixture_path.write_text(json.dumps({
+        "data": {
+            "matches": [{
+                "id": match_id,
+                "utcDate": kickoff_utc,
+                "status": "TIMED",
+                "stage": "GROUP_STAGE",
+                "group": "GROUP_A",
+                "matchday": 1,
+                "homeTeam": {"name": home, "tla": home[:3].upper()},
+                "awayTeam": {"name": away, "tla": away[:3].upper()},
+            }]
+        }
+    }), encoding="utf-8")
+    return fixture_path
+
+
+def test_has_late_window_fixtures_true_when_match_is_in_range(tmp_path: Path, monkeypatch) -> None:
+    """Fixture at T-45m (0.75h to KO) → has_late_window_fixtures returns True."""
+    module = load_payload()
+    configure_workspace(module, tmp_path)
+    monkeypatch.setenv("WC26_NOW_UTC", "2026-06-15T18:15:00Z")
+    _write_fixture_file(tmp_path, 537333, "2026-06-15T19:00:00Z")  # 0.75h = T-45m
+
+    assert module.has_late_window_fixtures() is True
+
+
+def test_has_late_window_fixtures_true_at_boundary_t60m(tmp_path: Path, monkeypatch) -> None:
+    """Fixture at T-60m (1.0h) → still True (upper boundary exclusive not hit)."""
+    module = load_payload()
+    configure_workspace(module, tmp_path)
+    monkeypatch.setenv("WC26_NOW_UTC", "2026-06-15T18:00:00Z")
+    _write_fixture_file(tmp_path, 537333, "2026-06-15T19:00:00Z")  # 1.0h = T-60m
+
+    assert module.has_late_window_fixtures() is True
+
+
+def test_has_late_window_fixtures_true_at_t20m_ad_hoc(tmp_path: Path, monkeypatch) -> None:
+    """LO=0: fixture at T-20m → still True (covers ad-hoc analysis gap)."""
+    module = load_payload()
+    configure_workspace(module, tmp_path)
+    monkeypatch.setenv("WC26_NOW_UTC", "2026-06-15T18:40:00Z")
+    _write_fixture_file(tmp_path, 537333, "2026-06-15T19:00:00Z")  # 0.33h = T-20m
+
+    assert module.has_late_window_fixtures() is True
+
+
+def test_has_late_window_fixtures_false_when_match_is_too_far(tmp_path: Path, monkeypatch) -> None:
+    """Fixture at T-90m (1.5h) → False (outside late window)."""
+    module = load_payload()
+    configure_workspace(module, tmp_path)
+    monkeypatch.setenv("WC26_NOW_UTC", "2026-06-15T17:30:00Z")
+    _write_fixture_file(tmp_path, 537333, "2026-06-15T19:00:00Z")  # 1.5h > 1.25
+
+    assert module.has_late_window_fixtures() is False
+
+
+def test_has_late_window_fixtures_false_when_no_fixtures(tmp_path: Path, monkeypatch) -> None:
+    """No fixture file → False."""
+    module = load_payload()
+    configure_workspace(module, tmp_path)
+    monkeypatch.setenv("WC26_NOW_UTC", "2026-06-15T18:15:00Z")
+
+    assert module.has_late_window_fixtures() is False
+
+
+def test_odds_broad_scan_force_flag_when_late_window_fixture_exists(tmp_path: Path, monkeypatch, capsys) -> None:
+    """When has_late_window_fixtures() is True, odds_broad_scan skips
+    cache_reuse and proceeds to fetch.  The critical assertion is that
+    the output must NOT contain 'reused_cache' — the force flag must
+    have bypassed TTL reuse, regardless of whether the subsequent API
+    call succeeds or blocks on a missing key."""
+    module = load_payload()
+    configure_workspace(module, tmp_path)
+    monkeypatch.setenv("WC26_NOW_UTC", "2026-06-15T18:15:00Z")
+    # Remove ODDS_API_KEY so we test the force branch without a live API call
+    monkeypatch.delenv("ODDS_API_KEY", raising=False)
+    _write_fixture_file(tmp_path, 537333, "2026-06-15T19:00:00Z")  # T-45m, in range
+
+    # Write a fake recent snapshot — if the function wrongly uses TTL reuse
+    # it would return cache_reuse_manifest, which contains "reused_cache".
+    snap_dir = tmp_path / "snapshots" / "odds"
+    snap_dir.mkdir(parents=True, exist_ok=True)
+    snap_path = snap_dir / "the-odds-api-multibook-20260615T181000Z.json"
+    snap_path.write_text(json.dumps({
+        "captured_at_utc": "2026-06-15T18:10:00Z",
+        "source": "the-odds-api",
+        "data": [],
+    }), encoding="utf-8")
+
+    exit_code = module.odds_broad_scan()
+    out = capsys.readouterr().out
+
+    # With late-window fixture, force=True → skip cache_reuse → go to API.
+    # No ODDS_API_KEY set, so it should block with "ODDS_API_KEY missing".
+    assert "reused_cache" not in out
+    assert "ODDS_API_KEY missing" in out
+
+
+def test_odds_broad_scan_ttl_reuse_when_no_late_window_fixture(tmp_path: Path, monkeypatch, capsys) -> None:
+    """Without late-window fixture, force=False → TTL reuse is allowed."""
+    module = load_payload()
+    configure_workspace(module, tmp_path)
+    monkeypatch.setenv("WC26_NOW_UTC", "2026-06-15T17:00:00Z")
+    monkeypatch.delenv("ODDS_API_KEY", raising=False)
+    _write_fixture_file(tmp_path, 537333, "2026-06-15T19:00:00Z")  # 2h, outside range
+
+    snap_dir = tmp_path / "snapshots" / "odds"
+    snap_dir.mkdir(parents=True, exist_ok=True)
+    snap_path = snap_dir / "the-odds-api-multibook-20260615T165500Z.json"
+    snap_path.write_text(json.dumps({
+        "captured_at_utc": "2026-06-15T16:55:00Z",
+        "source": "the-odds-api",
+        "data": [],
+    }), encoding="utf-8")
+
+    exit_code = module.odds_broad_scan()
+    out = capsys.readouterr().out
+
+    # Outside late window, no force refresh, snapshot is 5 min old < 120 min TTL.
+    # Should return cache_reuse.
+    assert exit_code == 0
+    assert "reused_cache" in out
