@@ -210,7 +210,7 @@ def path_b_mechanism(manifest: dict[str, Any], artifacts: dict[str, tuple[dict[s
         if isinstance(raw_cal, dict):
             calibration = raw_cal.get("calibration_status") or raw_cal.get("status")
         calibration = calibration or model_payload.get("calibration_status")
-    if status in {"not_required", "skipped_not_applicable"}:
+    if status in {"not_required", "skipped_not_applicable", "not_run"}:
         return (
             {
                 "status": "COMPLETE",

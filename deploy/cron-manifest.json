@@ -18,6 +18,18 @@
       }
     },
     {
+      "name": "wc26-odds-broad-scan",
+      "profile": "wc26-handicap-analyst",
+      "script": "wc26-odds-broad-scan.py",
+      "required": true,
+      "schedule": "*/30 * * * *",
+      "deliver": "local",
+      "mode": "no-agent",
+      "workdir": "/hermesdata/worldcup-2026-handicap",
+      "prompt": "Run deterministic WC26 odds broad scan payload.",
+      "env": {}
+    },
+    {
       "name": "wc26-match-window-direct",
       "profile": "wc26-handicap-analyst",
       "script": "wc26-match-window-direct.py",

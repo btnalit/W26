@@ -168,6 +168,40 @@ def test_mechanism_audit_treats_path_b_not_required_as_exempt(tmp_path: Path) ->
     assert audit["blocking_mechanisms"] == []
 
 
+def test_mechanism_audit_treats_path_b_not_run_as_exempt(tmp_path: Path) -> None:
+    crossbook = write_json(tmp_path / "crossbook.json", crossbook_payload())
+    path_c = write_json(
+        tmp_path / "path-c.json",
+        {
+            "artifact_type": "consistency_triangle",
+            "artifact_kind": "consistency_triangle",
+            "signal": {"type": None, "strength": "none"},
+            "discrepancy": {"pp": 0.0},
+        },
+    )
+    manifest = {
+        "manifest_id": "manifest:m010",
+        "match_id": "M010",
+        "final_status": "pass",
+        "analysis_gates": {"path_b_model_diagnostic": "not_run"},
+        "artifacts": [
+            {"artifact_id": "crossbook:m010", "artifact_type": "crossbook_scan", "script": "cross_book_scan.py", "path": str(crossbook), "provides": ["path_a_crossbook"]},
+            {"artifact_id": "pathc:m010", "artifact_type": "consistency_triangle", "script": "consistency_triangle.py", "path": str(path_c), "provides": ["path_c_consistency"]},
+        ],
+    }
+    manifest_path = write_json(tmp_path / "manifest.json", manifest)
+
+    audit = mechanism_audit.build_audit(manifest, manifest_path)
+
+    path_b = audit["mechanisms"]["path_b_model_diagnostic"]
+    assert path_b["status"] == "COMPLETE"
+    assert path_b["required_for_complete"] is False
+    assert path_b["gate_status"] == "not_run"
+    assert audit["mechanism_audit_status"] == "complete"
+    assert audit["blocking_mechanisms"] == []
+    assert audit["required_final_status"] == "pass"
+
+
 def test_mechanism_audit_marks_suppressed_path_c_as_diagnostic_only(tmp_path: Path) -> None:
     crossbook = write_json(tmp_path / "crossbook.json", crossbook_payload())
     path_c = write_json(

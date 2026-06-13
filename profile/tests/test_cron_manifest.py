@@ -28,6 +28,7 @@ def test_cron_manifest_declares_required_wc26_jobs_profile_and_scripts_exist() -
     jobs = {job["name"]: job for job in payload["jobs"]}
     for required in [
         "wc26-fixture-collect",
+        "wc26-odds-broad-scan",
         "wc26-match-window-direct",
         "wc26-postmatch-grade",
         "wc26-postmatch-notify",

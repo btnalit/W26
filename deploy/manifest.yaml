@@ -60,6 +60,7 @@ cron_manifest:
   checker: "deploy/check_cron_manifest.py"
   required_jobs:
     - wc26-fixture-collect
+    - wc26-odds-broad-scan
     - wc26-match-window-direct
     - wc26-postmatch-grade
     - wc26-postmatch-notify
