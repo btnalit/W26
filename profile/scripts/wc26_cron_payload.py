@@ -38,7 +38,16 @@ WINDOW_SPECS = [
     ("T-72h_early", "early_structural", 60.0, 84.0),
     ("T-24h_confirm", "confirmation", 18.0, 30.0),
     ("T-60m_lineup_final", "lineup_final", 0.75, 1.25),
+    ("T-45m_price_guard", "price_guard", 0.5, 0.75),
 ]
+
+# ── Late-window fixtures trigger forced odds refresh ──
+# T-60m and T-45m windows exist solely to capture the latest price.
+# Reusing a cached snapshot defeats their purpose.  When any fixture
+# is inside the late-window range (0.5–1.25 h to kickoff), the odds
+# collector must skip TTL reuse and always fetch fresh prices.
+LATE_WINDOW_HOURS_LO = 0.5
+LATE_WINDOW_HOURS_HI = 1.25
 
 
 def load_module(name: str, path: pathlib.Path):
@@ -212,6 +221,21 @@ def hours_to_kickoff(entry: dict[str, Any], now: datetime | None = None) -> floa
     if kickoff is None:
         return None
     return (kickoff - (now or current_time())).total_seconds() / 3600.0
+
+
+def has_late_window_fixtures(now: datetime | None = None) -> bool:
+    """Return True if any fixture is in T-60m or T-45m late window.
+
+    These windows exist solely to capture the latest price.  When a
+    fixture is 0.5–1.25 hours from kickoff, every odds snapshot must
+    be fresh — cached reuse is not acceptable.
+    """
+    now = now or current_time()
+    for entry in fixture_entries():
+        hours = hours_to_kickoff(entry, now)
+        if hours is not None and LATE_WINDOW_HOURS_LO <= hours <= LATE_WINDOW_HOURS_HI:
+            return True
+    return False
 
 
 def due_windows(now: datetime | None = None) -> list[dict[str, Any]]:
@@ -1252,7 +1276,12 @@ def fixture_collect() -> int:
 
 
 def odds_broad_scan() -> int:
-    if not force_refresh_requested():
+    # ── Late-window auto-force-refresh ──
+    # T-60m and T-45m windows exist to capture the latest price.
+    # When any fixture is within 0.5-1.25h of kickoff, skip TTL
+    # reuse regardless of the cron schedule or env override.
+    force = force_refresh_requested() or has_late_window_fixtures()
+    if not force:
         reusable = reusable_snapshot(
             WORKSPACE / "snapshots" / "odds",
             ["the-odds-api-multibook-*.json"],
@@ -1959,11 +1988,15 @@ def postmatch_notify() -> int:
 
 
 def match_window_direct() -> int:
-    """Emit direct summaries for newly due T-72h/T-24h/T-60m windows.
+    """Emit direct summaries for newly due T-72h/T-24h/T-60m/T-45m windows.
 
     The scanner is deterministic and no-agent. It does not fabricate reports.
     If a due window lacks a guarded manifest/report, it emits a one-time
     BLOCKED notice so the missing analysis cannot stay hidden.
+
+    Late-window fixtures (T-60m, T-45m) are handled by odds_broad_scan's
+    has_late_window_fixtures() auto-force-refresh — the cron collector
+    fetches fresh odds every cycle when any match is 0.5-1.25h from KO.
     """
     state = load_state("match-window-direct.json")
     sent = state.get("sent") if isinstance(state.get("sent"), dict) else {}

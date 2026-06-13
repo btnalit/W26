@@ -22,7 +22,7 @@
       "profile": "wc26-handicap-analyst",
       "script": "wc26-odds-broad-scan.py",
       "required": true,
-      "schedule": "*/30 * * * *",
+      "schedule": "*/15 * * * *",
       "deliver": "local",
       "mode": "no-agent",
       "workdir": "/hermesdata/worldcup-2026-handicap",
