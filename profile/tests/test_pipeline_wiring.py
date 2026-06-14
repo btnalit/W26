@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Callable
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -11,19 +14,67 @@ def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
-def test_report_consumed_capabilities_have_generation_wiring() -> None:
+def load_wiring() -> dict:
     wiring_path = ROOT / "profile" / "config" / "pipeline-wiring.json"
     assert wiring_path.exists(), "machine-readable wiring registry prevents consumer-only orphan modules"
-    wiring = json.loads(wiring_path.read_text(encoding="utf-8"))
+    return json.loads(wiring_path.read_text(encoding="utf-8"))
 
+
+def assert_generation_wired(wiring: dict, source_reader: Callable[[str], str] = read) -> None:
     generated = {item["capability"]: item for item in wiring["generated_capabilities"]}
-    for capability in ["path_a_crossbook", "path_c_consistency", "role_engine", "mechanism_audit", "motivation_context"]:
-        assert capability in generated
-        item = generated[capability]
+    consumed = wiring.get("report_consumed_capabilities")
+    assert consumed, "report_consumed_capabilities must list real consumer-side reads; empty list makes this guard inert"
+
+    for consumer_item in consumed:
+        capability = consumer_item["capability"]
+        assert capability in generated, f"report consumes {capability} but no producer wiring is declared"
+
+    for capability, item in generated.items():
         assert item["producer"]
-        for orchestrator in item["orchestrators"]:
-            source = read(orchestrator)
-            assert item["producer"] in source, f"{capability} producer not wired in {orchestrator}"
+        orchestrators = item.get("orchestrators") or []
+        assert orchestrators, f"{capability} must declare at least one orchestrator"
+        for orchestrator in orchestrators:
+            path = orchestrator["path"]
+            source = source_reader(path)
+            call_markers = orchestrator.get("generation_call_markers") or []
+            assert call_markers, f"{capability} in {path} must assert generation calls, not producer filename strings"
+            for marker in call_markers:
+                assert marker in source, f"{capability} generation call marker {marker!r} not wired in {path}"
+            for marker in orchestrator.get("manifest_markers", []):
+                assert marker in source, f"{capability} manifest marker {marker!r} not assembled in {path}"
+
+
+def test_report_consumed_capabilities_have_generation_wiring() -> None:
+    assert_generation_wired(load_wiring())
+
+
+def test_role_engine_wiring_guard_fails_when_generation_call_is_removed() -> None:
+    wiring = load_wiring()
+
+    def poisoned_reader(path: str) -> str:
+        source = read(path)
+        if path == "profile/skills/odds-analysis/scripts/wc26_match_pipeline.py":
+            return source.replace("build_role_artifact(", "REMOVED_BUILD_ROLE_ARTIFACT(")
+        return source
+
+    with pytest.raises(AssertionError, match="role_engine generation call marker"):
+        assert_generation_wired(wiring, poisoned_reader)
+
+
+def test_consumed_capability_evidence_markers_exist_in_consumers() -> None:
+    wiring = load_wiring()
+    consumed = wiring.get("report_consumed_capabilities") or []
+    assert consumed
+    for item in consumed:
+        capability = item["capability"]
+        consumers = item.get("consumers") or []
+        assert consumers, f"{capability} must declare the consumer files that actually read it"
+        for consumer in consumers:
+            source = read(consumer["path"])
+            markers = consumer.get("read_markers") or []
+            assert markers, f"{capability} consumer {consumer['path']} must declare concrete read markers"
+            for marker in markers:
+                assert marker in source, f"{capability} consumer marker {marker!r} missing in {consumer['path']}"
 
 
 def test_opportunity_watch_is_required_registered_sidecar() -> None:
@@ -40,9 +91,7 @@ def test_opportunity_watch_is_required_registered_sidecar() -> None:
 
 
 def test_rich_summary_is_declared_recovery_sidecar_not_primary_pipeline() -> None:
-    wiring_path = ROOT / "profile" / "config" / "pipeline-wiring.json"
-    assert wiring_path.exists()
-    wiring = json.loads(wiring_path.read_text(encoding="utf-8"))
+    wiring = load_wiring()
     sidecars = {item["script"]: item for item in wiring["sidecars"]}
 
     assert sidecars["rich_summary.py"]["status"] == "sidecar_recovery_summary"

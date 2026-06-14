@@ -1,20 +1,123 @@
 {
-  "schema_version": "wc26.pipeline_wiring.v1",
-  "purpose": "Machine-readable wiring registry: every report-consumed capability must have an explicit producer and orchestrator call path, and sidecars must declare whether they are primary or recovery-only.",
+  "schema_version": "wc26.pipeline_wiring.v2",
+  "purpose": "Machine-readable wiring registry: every report-consumed capability must have an explicit producer generation call and manifest assembly marker. This guards against consumer-only orphan modules and filename-import false positives.",
   "generated_capabilities": [
+    {
+      "capability": "devig_1x2",
+      "producer": "devig.py / numeric_artifact.py",
+      "orchestrators": [
+        {
+          "path": "profile/scripts/wc26-match-analyze.py",
+          "generation_call_markers": [
+            "generate_devig_artifact("
+          ],
+          "manifest_markers": [
+            "\"artifact_type\": \"devig\"",
+            "\"devig_1x2\""
+          ]
+        },
+        {
+          "path": "profile/skills/odds-analysis/scripts/wc26_match_pipeline.py",
+          "generation_call_markers": [
+            "numeric_artifact.scalar_payload("
+          ],
+          "manifest_markers": [
+            "\"artifact_type\": \"devig\""
+          ]
+        }
+      ],
+      "notes": "1X2 no-vig capability; direct report_contract and direct_summary both consume it."
+    },
+    {
+      "capability": "asian_handicap",
+      "producer": "devig.py / numeric_artifact.py",
+      "orchestrators": [
+        {
+          "path": "profile/scripts/wc26-match-analyze.py",
+          "generation_call_markers": [
+            "generate_devig_artifact("
+          ],
+          "manifest_markers": [
+            "\"artifact_type\": \"devig\"",
+            "\"asian_handicap\""
+          ]
+        },
+        {
+          "path": "profile/skills/odds-analysis/scripts/wc26_match_pipeline.py",
+          "generation_call_markers": [
+            "numeric_artifact.ah_payload("
+          ],
+          "manifest_markers": [
+            "\"artifact_type\": \"devig\""
+          ]
+        }
+      ],
+      "notes": "Asian handicap artifact consumed by report_contract and direct_summary."
+    },
+    {
+      "capability": "totals",
+      "producer": "devig.py",
+      "orchestrators": [
+        {
+          "path": "profile/scripts/wc26-match-analyze.py",
+          "generation_call_markers": [
+            "generate_devig_artifact("
+          ],
+          "manifest_markers": [
+            "\"artifact_type\": \"devig\"",
+            "\"totals\""
+          ]
+        }
+      ],
+      "notes": "Totals artifact in the live full path. Simulation compiler may omit it, but report consumers know how to render the missing/skipped state."
+    },
     {
       "capability": "path_a_crossbook",
       "producer": "cross_book_scan.py",
       "orchestrators": [
-        "profile/scripts/wc26-match-analyze.py"
+        {
+          "path": "profile/scripts/wc26-match-analyze.py",
+          "generation_call_markers": [
+            "subprocess.run(scan_cmd"
+          ],
+          "manifest_markers": [
+            "\"provides\": [\"path_a_crossbook\"]",
+            "\"artifact_type\": \"crossbook_scan\""
+          ]
+        }
       ],
-      "notes": "wc26_match_pipeline simulation path emits synthetic numeric artifacts; live full path uses wc26-match-analyze."
+      "notes": "Path A value scan. Test validates the subprocess call and provides/artifact_type assembly, not just a filename string."
+    },
+    {
+      "capability": "path_b_model_diagnostic",
+      "producer": "model_margin.py",
+      "orchestrators": [
+        {
+          "path": "profile/skills/odds-analysis/scripts/wc26_match_pipeline.py",
+          "generation_call_markers": [
+            "model_margin.poisson_score_matrix("
+          ],
+          "manifest_markers": [
+            "\"artifact_type\": \"model\""
+          ]
+        }
+      ],
+      "notes": "Model diagnostic capability is inferred from model artifacts by mechanism_audit. It remains diagnostic-only."
     },
     {
       "capability": "path_c_consistency",
       "producer": "consistency_triangle.py",
       "orchestrators": [
-        "profile/scripts/wc26-match-analyze.py"
+        {
+          "path": "profile/scripts/wc26-match-analyze.py",
+          "generation_call_markers": [
+            "subprocess.run(ct_cmd"
+          ],
+          "manifest_markers": [
+            "\"provides\": [\"path_c_consistency\"]",
+            "\"artifact_type\": \"consistency_triangle\""
+          ]
+        }
       ],
       "notes": "Path C provides market_profile and consistency diagnostics in the live full path."
     },
@@ -22,17 +125,51 @@
       "capability": "role_engine",
       "producer": "role_engine.py",
       "orchestrators": [
-        "profile/scripts/wc26-match-analyze.py",
-        "profile/skills/odds-analysis/scripts/wc26_match_pipeline.py"
+        {
+          "path": "profile/scripts/wc26-match-analyze.py",
+          "generation_call_markers": [
+            "subprocess.run(role_cmd",
+            "\"--patch-manifest\""
+          ],
+          "manifest_markers": []
+        },
+        {
+          "path": "profile/skills/odds-analysis/scripts/wc26_match_pipeline.py",
+          "generation_call_markers": [
+            "build_role_artifact("
+          ],
+          "manifest_markers": [
+            "\"artifact_type\": \"role_engine\"",
+            "\"provides\": [\"role_engine\"]"
+          ]
+        }
       ],
-      "notes": "Path D price-side game reading. Diagnostic only; never touches p_adj."
+      "notes": "Path D price-side game reading. Diagnostic only; never touches p_adj. Guard checks the generating call build_role_artifact(), so an import-only line cannot pass."
     },
     {
       "capability": "mechanism_audit",
       "producer": "mechanism_audit.py",
       "orchestrators": [
-        "profile/scripts/wc26-match-analyze.py",
-        "profile/skills/odds-analysis/scripts/wc26_match_pipeline.py"
+        {
+          "path": "profile/scripts/wc26-match-analyze.py",
+          "generation_call_markers": [
+            "subprocess.run(audit_cmd"
+          ],
+          "manifest_markers": [
+            "\"provides\": [\"mechanism_audit\"]",
+            "\"artifact_type\": \"mechanism_audit\""
+          ]
+        },
+        {
+          "path": "profile/skills/odds-analysis/scripts/wc26_match_pipeline.py",
+          "generation_call_markers": [
+            "build_audit("
+          ],
+          "manifest_markers": [
+            "\"artifact_type\": \"mechanism_audit\"",
+            "\"provides\": [\"mechanism_audit\"]"
+          ]
+        }
       ],
       "notes": "Must run after role_engine so role_engine mechanism is COMPLETE instead of BLOCKED."
     },
@@ -40,9 +177,175 @@
       "capability": "motivation_context",
       "producer": "motivation_context.py",
       "orchestrators": [
-        "profile/skills/odds-analysis/scripts/wc26_match_pipeline.py"
+        {
+          "path": "profile/skills/odds-analysis/scripts/wc26_match_pipeline.py",
+          "generation_call_markers": [
+            "analyze_motivation_context("
+          ],
+          "manifest_markers": [
+            "\"artifact_type\": \"motivation_context\"",
+            "\"provides\": [\"motivation_context\"]"
+          ]
+        }
       ],
       "notes": "Group-stage motivation context. matchday<3 returns NONE. Qualitative-only."
+    }
+  ],
+  "report_consumed_capabilities": [
+    {
+      "capability": "devig_1x2",
+      "consumers": [
+        {
+          "path": "profile/skills/odds-analysis/scripts/report_contract.py",
+          "read_markers": [
+            "DIRECT_REQUIRED_ARTIFACT_CAPABILITIES",
+            "\"devig_1x2\""
+          ]
+        },
+        {
+          "path": "profile/skills/odds-analysis/scripts/direct_summary.py",
+          "read_markers": [
+            "artifacts.get(\"devig_1x2\")"
+          ]
+        }
+      ]
+    },
+    {
+      "capability": "path_a_crossbook",
+      "consumers": [
+        {
+          "path": "profile/skills/odds-analysis/scripts/mechanism_audit.py",
+          "read_markers": [
+            "artifacts.get(\"path_a_crossbook\")"
+          ]
+        },
+        {
+          "path": "profile/skills/odds-analysis/scripts/report_contract.py",
+          "read_markers": [
+            "DIRECT_REQUIRED_ARTIFACT_CAPABILITIES",
+            "\"path_a_crossbook\""
+          ]
+        },
+        {
+          "path": "profile/skills/odds-analysis/scripts/direct_summary.py",
+          "read_markers": [
+            "artifacts.get(\"path_a_crossbook\")"
+          ]
+        }
+      ]
+    },
+    {
+      "capability": "asian_handicap",
+      "consumers": [
+        {
+          "path": "profile/skills/odds-analysis/scripts/report_contract.py",
+          "read_markers": [
+            "DIRECT_REQUIRED_ARTIFACT_CAPABILITIES",
+            "\"asian_handicap\""
+          ]
+        },
+        {
+          "path": "profile/skills/odds-analysis/scripts/direct_summary.py",
+          "read_markers": [
+            "artifacts.get(\"asian_handicap\")"
+          ]
+        }
+      ]
+    },
+    {
+      "capability": "totals",
+      "consumers": [
+        {
+          "path": "profile/skills/odds-analysis/scripts/report_contract.py",
+          "read_markers": [
+            "DIRECT_REQUIRED_ARTIFACT_CAPABILITIES",
+            "\"totals\""
+          ]
+        },
+        {
+          "path": "profile/skills/odds-analysis/scripts/direct_summary.py",
+          "read_markers": [
+            "artifacts.get(\"totals\")"
+          ]
+        }
+      ]
+    },
+    {
+      "capability": "path_b_model_diagnostic",
+      "consumers": [
+        {
+          "path": "profile/skills/odds-analysis/scripts/mechanism_audit.py",
+          "read_markers": [
+            "artifacts.get(\"path_b_model_diagnostic\")",
+            "\"path_b_model_diagnostic\""
+          ]
+        }
+      ]
+    },
+    {
+      "capability": "path_c_consistency",
+      "consumers": [
+        {
+          "path": "profile/skills/odds-analysis/scripts/mechanism_audit.py",
+          "read_markers": [
+            "artifacts.get(\"path_c_consistency\")"
+          ]
+        },
+        {
+          "path": "profile/skills/odds-analysis/scripts/report_contract.py",
+          "read_markers": [
+            "DIRECT_REQUIRED_ARTIFACT_CAPABILITIES",
+            "\"path_c_consistency\""
+          ]
+        },
+        {
+          "path": "profile/skills/odds-analysis/scripts/direct_summary.py",
+          "read_markers": [
+            "artifacts.get(\"path_c_consistency\")"
+          ]
+        }
+      ]
+    },
+    {
+      "capability": "role_engine",
+      "consumers": [
+        {
+          "path": "profile/skills/odds-analysis/scripts/mechanism_audit.py",
+          "read_markers": [
+            "artifacts.get(\"role_engine\")"
+          ]
+        },
+        {
+          "path": "profile/skills/odds-analysis/scripts/report_contract.py",
+          "read_markers": [
+            "artifact_payloads_by_cap.get(\"role_engine\")"
+          ]
+        },
+        {
+          "path": "profile/skills/odds-analysis/scripts/direct_summary.py",
+          "read_markers": [
+            "artifacts.get(\"role_engine\")"
+          ]
+        }
+      ]
+    },
+    {
+      "capability": "mechanism_audit",
+      "consumers": [
+        {
+          "path": "profile/skills/odds-analysis/scripts/report_contract.py",
+          "read_markers": [
+            "DIRECT_REQUIRED_ARTIFACT_CAPABILITIES",
+            "_validate_mechanism_audit_artifact("
+          ]
+        },
+        {
+          "path": "profile/skills/odds-analysis/scripts/direct_summary.py",
+          "read_markers": [
+            "artifacts.get(\"mechanism_audit\")"
+          ]
+        }
+      ]
     }
   ],
   "sidecars": [
