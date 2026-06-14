@@ -1,0 +1,76 @@
+{
+  "schema_version": "wc26.pipeline_wiring.v1",
+  "purpose": "Machine-readable wiring registry: every report-consumed capability must have an explicit producer and orchestrator call path, and sidecars must declare whether they are primary or recovery-only.",
+  "generated_capabilities": [
+    {
+      "capability": "path_a_crossbook",
+      "producer": "cross_book_scan.py",
+      "orchestrators": [
+        "profile/scripts/wc26-match-analyze.py"
+      ],
+      "notes": "wc26_match_pipeline simulation path emits synthetic numeric artifacts; live full path uses wc26-match-analyze."
+    },
+    {
+      "capability": "path_c_consistency",
+      "producer": "consistency_triangle.py",
+      "orchestrators": [
+        "profile/scripts/wc26-match-analyze.py"
+      ],
+      "notes": "Path C provides market_profile and consistency diagnostics in the live full path."
+    },
+    {
+      "capability": "role_engine",
+      "producer": "role_engine.py",
+      "orchestrators": [
+        "profile/scripts/wc26-match-analyze.py",
+        "profile/skills/odds-analysis/scripts/wc26_match_pipeline.py"
+      ],
+      "notes": "Path D price-side game reading. Diagnostic only; never touches p_adj."
+    },
+    {
+      "capability": "mechanism_audit",
+      "producer": "mechanism_audit.py",
+      "orchestrators": [
+        "profile/scripts/wc26-match-analyze.py",
+        "profile/skills/odds-analysis/scripts/wc26_match_pipeline.py"
+      ],
+      "notes": "Must run after role_engine so role_engine mechanism is COMPLETE instead of BLOCKED."
+    },
+    {
+      "capability": "motivation_context",
+      "producer": "motivation_context.py",
+      "orchestrators": [
+        "profile/skills/odds-analysis/scripts/wc26_match_pipeline.py"
+      ],
+      "notes": "Group-stage motivation context. matchday<3 returns NONE. Qualitative-only."
+    }
+  ],
+  "sidecars": [
+    {
+      "script": "direct_summary.py",
+      "status": "primary_direct_summary",
+      "called_by": [
+        "profile/scripts/wc26-match-analyze.py",
+        "profile/scripts/wc26-match-window-direct.py"
+      ],
+      "notes": "Primary deterministic Telegram-safe direct report summary."
+    },
+    {
+      "script": "rich_summary.py",
+      "status": "sidecar_recovery_summary",
+      "called_by": [
+        "blocked_recovery.py"
+      ],
+      "notes": "Recovery/deep-research summary sidecar, not the primary live pipeline output. Keep tested but do not treat as primary compiler path."
+    },
+    {
+      "script": "opportunity_watch.py",
+      "status": "cron_sidecar",
+      "called_by": [
+        "profile/scripts/wc26-opportunity-watch.py",
+        "deploy/cron-manifest.json"
+      ],
+      "notes": "Read-only opportunity board/alert sidecar. Registered as required WC26 profile cron."
+    }
+  ]
+}

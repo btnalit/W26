@@ -42,6 +42,18 @@
       "env": {}
     },
     {
+      "name": "wc26-opportunity-watch",
+      "profile": "wc26-handicap-analyst",
+      "script": "wc26-opportunity-watch.py",
+      "required": true,
+      "schedule": "*/30 * * * *",
+      "deliver": "telegram",
+      "mode": "no-agent",
+      "workdir": "/hermesdata/worldcup-2026-handicap",
+      "prompt": "Run deterministic WC26 opportunity watch sidecar; emit Telegram only on open/update/close.",
+      "env": {}
+    },
+    {
       "name": "wc26-postmatch-grade",
       "profile": "wc26-handicap-analyst",
       "script": "wc26-postmatch-grade.py",

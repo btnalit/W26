@@ -30,6 +30,7 @@ def test_cron_manifest_declares_required_wc26_jobs_profile_and_scripts_exist() -
         "wc26-fixture-collect",
         "wc26-odds-broad-scan",
         "wc26-match-window-direct",
+        "wc26-opportunity-watch",
         "wc26-postmatch-grade",
         "wc26-postmatch-notify",
         "wc26-blocked-recovery",
