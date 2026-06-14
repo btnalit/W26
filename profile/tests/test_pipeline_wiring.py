@@ -61,8 +61,7 @@ def test_role_engine_wiring_guard_fails_when_generation_call_is_removed() -> Non
         assert_generation_wired(wiring, poisoned_reader)
 
 
-def test_consumed_capability_evidence_markers_exist_in_consumers() -> None:
-    wiring = load_wiring()
+def assert_consumed_markers_exist(wiring: dict, source_reader: Callable[[str], str] = read) -> None:
     consumed = wiring.get("report_consumed_capabilities") or []
     assert consumed
     for item in consumed:
@@ -70,11 +69,28 @@ def test_consumed_capability_evidence_markers_exist_in_consumers() -> None:
         consumers = item.get("consumers") or []
         assert consumers, f"{capability} must declare the consumer files that actually read it"
         for consumer in consumers:
-            source = read(consumer["path"])
+            source = source_reader(consumer["path"])
             markers = consumer.get("read_markers") or []
             assert markers, f"{capability} consumer {consumer['path']} must declare concrete read markers"
             for marker in markers:
                 assert marker in source, f"{capability} consumer marker {marker!r} missing in {consumer['path']}"
+
+
+def test_consumed_capability_evidence_markers_exist_in_consumers() -> None:
+    assert_consumed_markers_exist(load_wiring())
+
+
+def test_role_engine_consumer_guard_fails_when_read_marker_is_fake() -> None:
+    wiring = load_wiring()
+    for item in wiring["report_consumed_capabilities"]:
+        if item["capability"] == "role_engine":
+            item["consumers"][0]["read_markers"].append("FAKE_ROLE_ENGINE_READ_MARKER_DOES_NOT_EXIST")
+            break
+    else:
+        raise AssertionError("role_engine must be present in report_consumed_capabilities")
+
+    with pytest.raises(AssertionError, match="FAKE_ROLE_ENGINE_READ_MARKER_DOES_NOT_EXIST"):
+        assert_consumed_markers_exist(wiring)
 
 
 def test_opportunity_watch_is_required_registered_sidecar() -> None:
