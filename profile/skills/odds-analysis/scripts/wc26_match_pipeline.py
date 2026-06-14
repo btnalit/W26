@@ -37,6 +37,7 @@ model_margin = load_module("model_margin", SCRIPT_DIR / "model_margin.py")
 report_contract = load_module("report_contract", SCRIPT_DIR / "report_contract.py")
 report_guard = load_module("report_guard", SCRIPT_DIR / "report_guard.py")
 fixture_registry = load_module("fixture_registry", SCRIPT_DIR / "fixture_registry.py")
+motivation_context = load_module("motivation_context", SCRIPT_DIR / "motivation_context.py")
 
 
 def parse_utc(raw: str) -> datetime:
@@ -70,6 +71,7 @@ def fixture_by_match_id(fixture_path: Path, match_id: str) -> dict[str, Any]:
         "kickoff_utc": item.get("kickoff_utc"),
         "stage": item.get("stage"),
         "group": item.get("group"),
+        "matchday": item.get("matchday"),
         "venue": item.get("venue") or "TBD",
         "fixture_status": item.get("status"),
     }
@@ -89,6 +91,37 @@ def artifact_from_payload(out_dir: Path, payload: dict[str, Any], numbers: list[
         "path": str(path),
         "source_snapshot_id": payload.get("source_snapshot_id"),
     }
+
+
+def _load_optional_json(path: Path | None) -> Any:
+    if path is None:
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def build_motivation_artifact(args: argparse.Namespace, artifact_dir: Path, fixture: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    standings = _load_optional_json(getattr(args, "standings_path", None))
+    remaining = _load_optional_json(getattr(args, "remaining_fixtures_path", None))
+    rules = _load_optional_json(getattr(args, "advancement_rules_path", None))
+    artifact = motivation_context.analyze_motivation_context(
+        standings=standings,
+        group_remaining_fixtures=remaining,
+        match_under_analysis=fixture,
+        advancement_rules=rules,
+    )
+    artifact_id = f"motivation:{fixture['match_id']}:{stable_slug([fixture['match_id'], str(fixture.get('matchday')), artifact.get('situation_tag') or 'NONE'])}"
+    artifact["artifact_id"] = artifact_id
+    path = artifact_dir / f"{artifact_id.replace(':', '-')}.json"
+    write_json(path, artifact)
+    manifest_entry = {
+        "artifact_id": artifact_id,
+        "artifact_type": "motivation_context",
+        "script": "motivation_context.py",
+        "path": str(path),
+        "provides": ["motivation_context"],
+        "source_snapshot_id": artifact.get("standings_snapshot_id"),
+    }
+    return artifact, manifest_entry
 
 
 def build_numeric_chain(args: argparse.Namespace, run_dir: Path, fixture: dict[str, Any]) -> dict[str, Any]:
@@ -140,6 +173,7 @@ def build_numeric_chain(args: argparse.Namespace, run_dir: Path, fixture: dict[s
     )
     ah_payload, ah_numbers = numeric_artifact.ah_payload(ah_args)
     ah_artifact = artifact_from_payload(artifact_dir, ah_payload, ah_numbers)
+    motivation_artifact, motivation_manifest_entry = build_motivation_artifact(args, artifact_dir, fixture)
 
     p_market_home = scalar_payload["no_vig_probabilities"][0]
     p_adj_home = p_market_home
@@ -156,6 +190,7 @@ def build_numeric_chain(args: argparse.Namespace, run_dir: Path, fixture: dict[s
         "timing_class": args.timing_class,
         "market_set": args.market_set,
         "created_at_utc": as_of,
+        "motivation_context": motivation_artifact,
         "adjustment_ledger_id": f"ledger:{fixture['match_id']}:{slug}:default_p_adj_equals_market",
         "adjustment_ledger": [
             {
@@ -194,6 +229,7 @@ def build_numeric_chain(args: argparse.Namespace, run_dir: Path, fixture: dict[s
                 "source_snapshot_id": f"{snapshot_prefix}:{fixture['match_id']}:model:{as_of}",
             },
             ah_artifact,
+            motivation_manifest_entry,
         ],
     }
     return manifest
@@ -209,6 +245,8 @@ def report_text(args: argparse.Namespace, fixture: dict[str, Any], manifest_path
     ah_ev = numbers["asian_handicap_ev"]["value"]
     ah_kelly = numbers["asian_handicap_kelly"]["value"]
     final_status = manifest["final_status"]
+    motivation = manifest.get("motivation_context", {})
+    motivation_hint = motivation.get("model_hint", {}) if isinstance(motivation, dict) else {}
     mode_note = "synthetic no-paid canary" if args.mode == "simulation" else "live cached snapshot"
     source_snapshot = scalar_artifact["source_snapshot_id"]
     ah_snapshot = ah_artifact["source_snapshot_id"]
@@ -268,6 +306,16 @@ def report_text(args: argparse.Namespace, fixture: dict[str, Any], manifest_path
             "## 6. Market Psychology",
             "",
             "No bookmaker-intent claim is made by the compiler.",
+            "",
+            "## 6A. motivation_context",
+            "",
+            f"- contract: {motivation.get('contract', 'wc26.motivation_context.v1')}",
+            f"- status: {motivation.get('status', 'none')}",
+            f"- situation_tag: {motivation.get('situation_tag', 'NONE')}",
+            f"- direction: {motivation_hint.get('direction', 'none')}",
+            f"- magnitude: {motivation_hint.get('magnitude', 'qualitative_only')}",
+            f"- footnote: {motivation.get('footnote_zh', '动机情境·描述性·非下注信号')}",
+            "- actionability: diagnostic_only unless market_reflection_check + Path A both pass",
             "",
             "## 7. Bookmaker Intent Hypotheses",
             "",
@@ -399,6 +447,9 @@ def main() -> int:
     parser.add_argument("--ah-line", type=float, default=-1.0)
     parser.add_argument("--ah-price", type=float, default=1.88)
     parser.add_argument("--ah-price-format", default="decimal", choices=sorted(numeric_artifact.devig.SUPPORTED_ODDS_FORMATS))
+    parser.add_argument("--standings-path", type=Path)
+    parser.add_argument("--remaining-fixtures-path", type=Path)
+    parser.add_argument("--advancement-rules-path", type=Path)
     args = parser.parse_args()
 
     result = compile_report(args)

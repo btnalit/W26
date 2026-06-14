@@ -80,10 +80,12 @@ echo "--- shared scripts/config ---"
 cp "$SKILL_DEST/cross_book_scan.py" /hermesdata/worldcup-2026-handicap/scripts/cross_book_scan.py
 echo "  deployed: /hermesdata/worldcup-2026-handicap/scripts/cross_book_scan.py (from canonical)"
 mkdir -p /hermesdata/worldcup-2026-handicap/config
-if [ -f "$REPO_ROOT/profile/config/match-context-overrides.json" ]; then
-    cp "$REPO_ROOT/profile/config/match-context-overrides.json" /hermesdata/worldcup-2026-handicap/config/match-context-overrides.json
-    echo "  deployed: /hermesdata/worldcup-2026-handicap/config/match-context-overrides.json"
-fi
+for cfg in "$REPO_ROOT"/profile/config/*.json; do
+    if [ -f "$cfg" ]; then
+        cp "$cfg" "/hermesdata/worldcup-2026-handicap/config/$(basename "$cfg")"
+        echo "  deployed: /hermesdata/worldcup-2026-handicap/config/$(basename "$cfg")"
+    fi
+done
 
 # ── 4. __init__.py files ──
 echo "--- __init__.py ---"

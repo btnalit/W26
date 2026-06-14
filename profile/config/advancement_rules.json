@@ -1,0 +1,18 @@
+{
+  "competition": "FIFA World Cup 2026",
+  "contract": "wc26.advancement_rules.v1",
+  "direct_slots": 2,
+  "best_third_slots": 8,
+  "third_place_policy": "external_cross_group_dependency",
+  "tiebreakers": [
+    "Pts",
+    "GD",
+    "GF",
+    "head_to_head_points",
+    "head_to_head_goal_difference",
+    "head_to_head_goals_for",
+    "fair_play",
+    "drawing_of_lots"
+  ],
+  "note": "Motivation context is group-local and deterministic. Best-third qualification requires cross-group standings; callers must provide explicit cross-group context before treating third place as possible/certain. The module never emits probability-point adjustments."
+}
