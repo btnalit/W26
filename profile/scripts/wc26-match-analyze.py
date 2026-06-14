@@ -239,7 +239,7 @@ def build_manifest(
         },
         "artifact_capabilities": [
             "devig_1x2", "path_a_crossbook", "asian_handicap",
-            "totals", "path_c_consistency", "mechanism_audit"
+            "totals", "path_c_consistency", "role_engine", "mechanism_audit"
         ],
         "analysis_gates": {},
     }
@@ -515,7 +515,34 @@ def run_orchestrator(
     except subprocess.TimeoutExpired:
         print(f"[match-analyze]   consistency_triangle 超时", file=sys.stderr)
 
-    # ── Step 5: mechanism_audit ──
+    # ── Step 5: role_engine (Path D price-side game context) ──
+    role_path = output_dir / f"role-engine-{match_id}-{stable_id(captured_at)}.json"
+    role_cmd = [
+        PYTHON, str(SKILL_SCRIPTS / "role_engine.py"),
+        "--manifest", str(manifest_path),
+        "--output", str(role_path),
+        "--patch-manifest",
+    ]
+    role_ok = False
+    try:
+        role_ret = subprocess.run(role_cmd, capture_output=True, text=True, timeout=90)
+        if role_ret.returncode == 0:
+            role_ok = True
+            manifest = read_json(manifest_path, manifest)
+            print(f"[match-analyze]   role_engine: {role_path.name}")
+        else:
+            manifest.setdefault("analysis_gates", {})["role_engine"] = {
+                "status": "failed",
+                "reason": (role_ret.stderr or role_ret.stdout or "role_engine failed").strip()[:300],
+            }
+            write_json(manifest_path, manifest)
+            print(f"[match-analyze]   role_engine stderr: {(role_ret.stderr or role_ret.stdout)[:300]}", file=sys.stderr)
+    except subprocess.TimeoutExpired:
+        manifest.setdefault("analysis_gates", {})["role_engine"] = {"status": "failed", "reason": "timeout (90s)"}
+        write_json(manifest_path, manifest)
+        print(f"[match-analyze]   role_engine 超时", file=sys.stderr)
+
+    # ── Step 6: mechanism_audit ──
     audit_path = output_dir / f"audit-{match_id}-{stable_id(captured_at)}.json"
     audit_cmd = [
         PYTHON, str(SKILL_SCRIPTS / "mechanism_audit.py"),
@@ -547,6 +574,23 @@ def run_orchestrator(
     report_md = generate_report(manifest, match, match_id, match_home, match_away, window, health_note)
     write_json(report_path, report_md)  # 不对, report 是 markdown
     report_path.write_text(report_md, encoding="utf-8")
+    if role_ok and role_path.exists():
+        role_patch_cmd = [
+            PYTHON, str(SKILL_SCRIPTS / "role_engine.py"),
+            "--manifest", str(manifest_path),
+            "--output", str(role_path),
+            "--patch-manifest",
+            "--report", str(report_path),
+            "--patch-report",
+        ]
+        try:
+            role_patch_ret = subprocess.run(role_patch_cmd, capture_output=True, text=True, timeout=90)
+            if role_patch_ret.returncode != 0:
+                print(f"[match-analyze]   role_engine report patch stderr: {(role_patch_ret.stderr or role_patch_ret.stdout)[:300]}", file=sys.stderr)
+            else:
+                manifest = read_json(manifest_path, manifest)
+        except subprocess.TimeoutExpired:
+            print(f"[match-analyze]   role_engine report patch 超时", file=sys.stderr)
     manifest["report_path"] = str(report_path)
     write_json(manifest_path, manifest)
     print(f"[match-analyze]   report: {report_path.name}")

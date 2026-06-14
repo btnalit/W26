@@ -38,6 +38,8 @@ report_contract = load_module("report_contract", SCRIPT_DIR / "report_contract.p
 report_guard = load_module("report_guard", SCRIPT_DIR / "report_guard.py")
 fixture_registry = load_module("fixture_registry", SCRIPT_DIR / "fixture_registry.py")
 motivation_context = load_module("motivation_context", SCRIPT_DIR / "motivation_context.py")
+role_engine = load_module("role_engine", SCRIPT_DIR / "role_engine.py")
+mechanism_audit = load_module("mechanism_audit", SCRIPT_DIR / "mechanism_audit.py")
 
 
 def parse_utc(raw: str) -> datetime:
@@ -122,6 +124,49 @@ def build_motivation_artifact(args: argparse.Namespace, artifact_dir: Path, fixt
         "source_snapshot_id": artifact.get("standings_snapshot_id"),
     }
     return artifact, manifest_entry
+
+
+def append_role_engine_artifact(manifest: dict[str, Any], manifest_path: Path, artifact_dir: Path) -> dict[str, Any]:
+    artifact = role_engine.build_role_artifact(manifest, manifest_path)
+    artifact_path = artifact_dir / f"{artifact['artifact_id'].replace(':', '-')}.json"
+    write_json(artifact_path, artifact)
+    manifest.setdefault("artifacts", []).append(
+        {
+            "artifact_id": artifact["artifact_id"],
+            "artifact_type": "role_engine",
+            "script": "role_engine.py",
+            "path": str(artifact_path),
+            "provides": ["role_engine"],
+        }
+    )
+    manifest.setdefault("analysis_gates", {})["role_engine"] = "pass"
+    caps = manifest.setdefault("artifact_capabilities", [])
+    if isinstance(caps, list) and "role_engine" not in caps:
+        caps.append("role_engine")
+    return artifact
+
+
+def append_mechanism_audit_artifact(manifest: dict[str, Any], manifest_path: Path, artifact_dir: Path) -> dict[str, Any]:
+    audit = mechanism_audit.build_audit(manifest, manifest_path)
+    match_id = manifest.get("match_id") or (manifest.get("match") or {}).get("match_id") or "UNKNOWN"
+    artifact_id = f"mechanism:{match_id}:{stable_slug([json.dumps(audit, ensure_ascii=False, sort_keys=True, default=str)])}"
+    audit["artifact_id"] = artifact_id
+    audit_path = artifact_dir / f"{artifact_id.replace(':', '-')}.json"
+    write_json(audit_path, audit)
+    manifest.setdefault("artifacts", []).append(
+        {
+            "artifact_id": artifact_id,
+            "artifact_type": "mechanism_audit",
+            "script": "mechanism_audit.py",
+            "path": str(audit_path),
+            "provides": ["mechanism_audit"],
+        }
+    )
+    manifest.setdefault("analysis_gates", {})["mechanism_audit"] = "pass"
+    caps = manifest.setdefault("artifact_capabilities", [])
+    if isinstance(caps, list) and "mechanism_audit" not in caps:
+        caps.append("mechanism_audit")
+    return audit
 
 
 def build_numeric_chain(args: argparse.Namespace, run_dir: Path, fixture: dict[str, Any]) -> dict[str, Any]:
@@ -384,12 +429,19 @@ def compile_report(args: argparse.Namespace) -> dict[str, Any]:
     manifest_path = run_dir / "manifest.json"
     write_json(manifest_path, manifest)
 
+    artifact_dir = run_dir / "artifacts"
+    role_artifact = append_role_engine_artifact(manifest, manifest_path, artifact_dir)
+    write_json(manifest_path, manifest)
+    append_mechanism_audit_artifact(manifest, manifest_path, artifact_dir)
+    write_json(manifest_path, manifest)
+
     contract_result = report_contract.validate_manifest(manifest, manifest_path)
     if not contract_result.get("valid"):
         raise RuntimeError("report_contract failed: " + "; ".join(contract_result.get("errors", [])))
 
     report_path = run_dir / "report.md"
     report_path.write_text(report_text(args, fixture, manifest_path, manifest), encoding="utf-8")
+    role_engine.patch_report(report_path, role_artifact)
     guard_result = report_guard.validate_report(report_path)
     if not guard_result.get("safe_to_relay"):
         raise RuntimeError("report_guard failed: " + "; ".join(guard_result.get("errors", [])))
