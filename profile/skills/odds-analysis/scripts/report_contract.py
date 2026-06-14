@@ -45,6 +45,7 @@ DIRECT_REQUIRED_ARTIFACT_CAPABILITIES = {
 }
 DIRECT_OK_GATE_STATUSES = {"pass", "ok", "complete", "no_signal", "diagnostic", "not_required"}
 DIRECT_SKIPPED_GATE_STATUSES = {"skipped_missing_source", "skipped_not_applicable", "skipped_partial"}
+DIRECT_ROLE_ENGINE_BLOCKED_STATUSES = {"blocked_schedule", "not_run", "skip", "skipped", "blocked", "missing"}
 DIRECT_CAPABILITY_TO_GATE = {
     "devig_1x2": "devig_three_method",
     "path_a_crossbook": "path_a_crossbook",
@@ -660,6 +661,10 @@ def _extract_report_pct(line: str, aliases: set[str]) -> float | None:
         pattern = rf"\b{re.escape(alias)}\b[^%\n]{{0,50}}?([0-9]+(?:\.[0-9]+)?)%"
         match = re.search(pattern, normalized)
         if match:
+            start, end = match.span(1)
+            following = normalized[end : end + 32]
+            if "win probability" in following:
+                continue
             try:
                 return float(match.group(1))
             except ValueError:
@@ -1025,6 +1030,17 @@ def _validate_direct_live_contract(
         _validate_mechanism_audit_artifact(audit_payload, artifact_payloads_by_cap, errors)
 
     _validate_report_text_market_probabilities(payload, artifact_payloads_by_cap, manifest_path, errors)
+
+    role_gate_status = _gate_status(gates.get("role_engine")) if isinstance(gates, dict) else ""
+    if (
+        not is_partial
+        and role_gate_status in DIRECT_ROLE_ENGINE_BLOCKED_STATUSES
+        and "role_engine" not in capabilities
+    ):
+        errors.append(
+            f"live direct complete report cannot relay with analysis_gates.role_engine={role_gate_status} "
+            "and no role_engine artifact; run role_engine recovery before summary/relay"
+        )
 
     def audit_blocks_gate(gate: str) -> bool:
         for audit_payload in mechanism_audit_payloads:

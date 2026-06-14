@@ -1156,6 +1156,56 @@ def test_report_contract_rejects_report_text_with_reversed_ah_totals_probs(tmp_p
     assert "report text totals probability" in " ".join(result["errors"])
 
 
+def test_extract_report_pct_ignores_h2h_win_probability_for_spread_outcome() -> None:
+    line = "Extreme favorite pricing: Germany at 1.05 means market prices >94% win probability. Pinnacle AH -3.5 near 50/50."
+
+    assert report_contract._extract_report_pct(line, {"germany", "ger"}) is None
+
+
+def test_report_contract_ignores_h2h_win_probability_when_a_line_mentions_ah_context(tmp_path: Path) -> None:
+    _request_path, manifest_path, report_path = write_relay_ready_direct_fixture(tmp_path, "completed_cached")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    crossbook_entry = next(item for item in manifest["artifacts"] if "path_a_crossbook" in item.get("provides", []))
+    crossbook_path = Path(crossbook_entry["path"])
+    crossbook = json.loads(crossbook_path.read_text(encoding="utf-8"))
+    crossbook["markets"]["spreads"] = {
+        "status": "ok",
+        "sharp_anchor": "pinnacle",
+        "devig_primary": "shin",
+        "outcomes_scanned": ["germany@-3.5", "curaçao@3.5"],
+        "quotes_scanned": 0,
+        "fair_probs": {
+            "shin": {"germany@-3.5": 0.488, "curaçao@3.5": 0.512},
+            "power": {"germany@-3.5": 0.488, "curaçao@3.5": 0.512},
+            "multiplicative": {"germany@-3.5": 0.488, "curaçao@3.5": 0.512},
+        },
+        "quotes": [],
+        "edges": [],
+    }
+    crossbook_path.write_text(json.dumps(crossbook), encoding="utf-8")
+    report_path.write_text(
+        "Extreme favorite pricing: Germany at 1.05 means market prices >94% win probability. "
+        "Pinnacle AH -3.5 at near 50/50 implies the market sees a roughly 3-goal margin as median.\n",
+        encoding="utf-8",
+    )
+
+    result = report_contract.validate_manifest(manifest, manifest_path)
+
+    assert "report text spreads probability" not in " ".join(result["errors"])
+
+
+def test_live_direct_complete_report_rejects_blocked_role_engine_without_artifact(tmp_path: Path) -> None:
+    _request_path, manifest_path, _report_path = write_relay_ready_direct_fixture(tmp_path, "completed_cached")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["analysis_gates"]["role_engine"] = "blocked_schedule"
+
+    result = report_contract.validate_manifest(manifest, manifest_path)
+
+    assert result["valid"] is False
+    assert "role_engine" in " ".join(result["errors"])
+    assert "blocked_schedule" in " ".join(result["errors"])
+
+
 def test_live_direct_pass_incomplete_allows_audit_blocked_mechanism(tmp_path: Path) -> None:
     request_path = tmp_path / "direct-request.json"
     request_path.write_text(

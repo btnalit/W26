@@ -1136,6 +1136,114 @@ def recover_legacy_guarded_report(event: dict[str, Any], recovery_id: str) -> di
     return result
 
 
+def canonicalize_manifest_match_id_for_recovery(manifest: dict[str, Any]) -> list[str]:
+    current = normalize_match_id(manifest.get("match_id") or (manifest.get("match") or {}).get("match_id"))
+    if re.fullmatch(r"M\d{3}", current or ""):
+        return []
+    registry = load_fixture_registry()
+    by_fd = registry.get("by_football_data_id") if isinstance(registry, dict) and isinstance(registry.get("by_football_data_id"), dict) else {}
+    fd = manifest.get("football_data_id")
+    if fd in (None, ""):
+        canonical_id = str(manifest.get("canonical_id") or "")
+        if canonical_id.startswith("fd:"):
+            fd = canonical_id.split(":", 1)[1]
+    entry = by_fd.get(str(fd)) if fd not in (None, "") else None
+    if not isinstance(entry, dict):
+        return []
+    local_id = normalize_match_id(entry.get("local_ordinal_id"))
+    if not re.fullmatch(r"M\d{3}", local_id or ""):
+        return []
+    manifest["match_id"] = local_id
+    if isinstance(manifest.get("match"), dict):
+        manifest["match"]["match_id"] = local_id
+    return ["canonicalize_match_id"]
+
+
+def normalize_legacy_direct_manifest_for_recovery(manifest: dict[str, Any], manifest_path: Path) -> list[str]:
+    """Downgrade legacy/cached manifests that mislabeled derived artifacts as standalone capabilities.
+
+    local_snapshot_rebuild reports could mark a crossbook artifact as also providing
+    devig_1x2 even though the artifact payload's own provides list only says
+    path_a_crossbook. Recovery must not relay that as complete; it should cap the
+    report as partial and make the missing devig gate explicit before regenerating
+    role/mechanism artifacts.
+    """
+    actions: list[str] = []
+    artifacts_raw = manifest.get("artifacts")
+    artifacts = artifacts_raw if isinstance(artifacts_raw, list) else []
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        provides = artifact.get("provides")
+        if not isinstance(provides, list) or "devig_1x2" not in provides:
+            continue
+        artifact_path = resolve_path(artifact.get("path"), manifest_path)
+        payload = read_json(artifact_path, {}) if artifact_path else {}
+        payload_provides = payload.get("provides") if isinstance(payload, dict) else []
+        if isinstance(payload_provides, list) and "devig_1x2" in payload_provides:
+            continue
+        artifact["provides"] = [item for item in provides if item != "devig_1x2"]
+        gates = manifest.setdefault("analysis_gates", {})
+        if isinstance(gates, dict):
+            gates["devig_three_method"] = "skipped_missing_source"
+        manifest["report_completeness"] = "partial"
+        manifest["final_status"] = "watch"
+        manifest["source_quality_cap"] = "C"
+        manifest["actionable_allowed"] = False
+        skipped = manifest.setdefault("skipped_sections", [])
+        if isinstance(skipped, list) and not any(isinstance(item, dict) and item.get("gate") == "devig_three_method" for item in skipped):
+            skipped.append(
+                {
+                    "gate": "devig_three_method",
+                    "reason": "legacy cached manifest mislabeled crossbook as standalone three-method devig",
+                    "impact": "1X2 devig is not independently auditable; report remains partial/watch",
+                }
+            )
+        actions.append("downgrade_legacy_misdeclared_devig")
+    return actions
+
+
+def patch_report_headers_for_manifest(report_path: Path | None, manifest: dict[str, Any]) -> bool:
+    if report_path is None or not report_path.exists():
+        return False
+    try:
+        text = report_path.read_text(encoding="utf-8")
+    except Exception:
+        return False
+    replacements = {
+        "match_id": manifest.get("match_id"),
+        "report_completeness": manifest.get("report_completeness"),
+        "source_quality": manifest.get("source_quality"),
+        "source_quality_cap": manifest.get("source_quality_cap"),
+        "final_status": manifest.get("final_status"),
+    }
+    changed = False
+    lines: list[str] = []
+    seen: set[str] = set()
+    for line in text.splitlines():
+        key = line.split(":", 1)[0].strip() if ":" in line else ""
+        if key in replacements and replacements[key] is not None:
+            new_line = f"{key}: {replacements[key]}"
+            lines.append(new_line)
+            seen.add(key)
+            changed = changed or new_line != line
+        else:
+            lines.append(line)
+    if "source_quality_cap" not in seen and replacements.get("source_quality_cap") is not None:
+        insert_after = next((i for i, line in enumerate(lines) if line.startswith("source_quality:")), None)
+        insert_at = (insert_after + 1) if insert_after is not None else min(len(lines), 12)
+        lines.insert(insert_at, f"source_quality_cap: {replacements['source_quality_cap']}")
+        changed = True
+    if "report_completeness" not in seen and replacements.get("report_completeness") is not None:
+        insert_after = next((i for i, line in enumerate(lines) if line.startswith("mode:")), None)
+        insert_at = (insert_after + 1) if insert_after is not None else min(len(lines), 12)
+        lines.insert(insert_at, f"report_completeness: {replacements['report_completeness']}")
+        changed = True
+    if changed:
+        report_path.write_text("\n".join(lines) + ("\n" if text.endswith("\n") else ""), encoding="utf-8")
+    return changed
+
+
 def direct_summary(manifest_path: Path, report_path: Path | None) -> tuple[bool, str]:
     cmd = [python_bin(), str(SCRIPTS_DIR / "rich_summary.py"), "--manifest", str(manifest_path), "--max-chars", "3900"]
     if report_path:
@@ -1156,6 +1264,16 @@ def recover_missing_artifacts(event: dict[str, Any], recovery_id: str) -> dict[s
         return {"status": "failed", "reason": "manifest is not a JSON object"}
     manifest_original_text = manifest_path.read_text(encoding="utf-8")
 
+    report_path = resolve_path(event.get("report_path"), manifest_path) or manifest_report_path(manifest_before, manifest_path)
+    report_original_text = report_path.read_text(encoding="utf-8") if report_path and report_path.exists() else None
+    match_id = str(manifest_before.get("match_id") or (manifest_before.get("match") or {}).get("match_id") or "unknown").upper()
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    actions: list[str] = []
+    actions.extend(canonicalize_manifest_match_id_for_recovery(manifest_before))
+    actions.extend(normalize_legacy_direct_manifest_for_recovery(manifest_before, manifest_path))
+    if actions:
+        write_json(manifest_path, manifest_before)
+    match_id = str(manifest_before.get("match_id") or (manifest_before.get("match") or {}).get("match_id") or match_id).upper()
     preserved = {
         "final_status": manifest_before.get("final_status"),
         "source_quality": manifest_before.get("source_quality"),
@@ -1163,11 +1281,6 @@ def recover_missing_artifacts(event: dict[str, Any], recovery_id: str) -> dict[s
         "actionable_allowed": manifest_before.get("actionable_allowed"),
         "report_completeness": manifest_before.get("report_completeness"),
     }
-    report_path = resolve_path(event.get("report_path"), manifest_path) or manifest_report_path(manifest_before, manifest_path)
-    report_original_text = report_path.read_text(encoding="utf-8") if report_path and report_path.exists() else None
-    match_id = str(manifest_before.get("match_id") or (manifest_before.get("match") or {}).get("match_id") or "unknown").upper()
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    actions: list[str] = []
 
     caps = manifest_artifact_caps(manifest_before)
     generated_path_c = False
@@ -1271,6 +1384,8 @@ def recover_missing_artifacts(event: dict[str, Any], recovery_id: str) -> dict[s
             }
         )
     write_json(manifest_path, manifest_after)
+    if patch_report_headers_for_manifest(report_path, manifest_after):
+        actions.append("patch_report_headers")
 
     ok, validation = validate_manifest(manifest_path, report_path)
     if not ok:

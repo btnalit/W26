@@ -113,3 +113,19 @@ def test_rich_summary_is_declared_recovery_sidecar_not_primary_pipeline() -> Non
     assert sidecars["rich_summary.py"]["status"] == "sidecar_recovery_summary"
     assert "blocked_recovery.py" in sidecars["rich_summary.py"]["called_by"]
     assert sidecars["direct_summary.py"]["status"] == "primary_direct_summary"
+
+
+def test_direct_report_bypass_paths_are_registered_for_role_engine_recovery() -> None:
+    wiring = load_wiring()
+    role_engine = next(item for item in wiring["generated_capabilities"] if item["capability"] == "role_engine")
+    orchestrator_paths = {item["path"] for item in role_engine["orchestrators"]}
+
+    assert "profile/skills/odds-analysis/scripts/blocked_recovery.py" in orchestrator_paths
+    recovery = next(
+        item
+        for item in role_engine["orchestrators"]
+        if item["path"] == "profile/skills/odds-analysis/scripts/blocked_recovery.py"
+    )
+    assert "local_snapshot_rebuild" in recovery.get("covers", [])
+    assert "legacy_guarded_report" in recovery.get("covers", [])
+    assert "cached_direct_report" in recovery.get("covers", [])

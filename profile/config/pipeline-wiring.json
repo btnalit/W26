@@ -142,6 +142,21 @@
             "\"artifact_type\": \"role_engine\"",
             "\"provides\": [\"role_engine\"]"
           ]
+        },
+        {
+          "path": "profile/skills/odds-analysis/scripts/blocked_recovery.py",
+          "covers": [
+            "local_snapshot_rebuild",
+            "legacy_guarded_report",
+            "cached_direct_report"
+          ],
+          "generation_call_markers": [
+            "role_cmd = [",
+            "\"--patch-manifest\""
+          ],
+          "manifest_markers": [
+            "generate_role_engine"
+          ]
         }
       ],
       "notes": "Path D price-side game reading. Diagnostic only; never touches p_adj. Guard checks the generating call build_role_artifact(), so an import-only line cannot pass."

@@ -525,6 +525,129 @@ def test_existing_guarded_report_with_missing_path_c_is_repaired(tmp_path: Path,
     assert called["event"]["report_path"] == str(report_path)
 
 
+def test_recovery_canonicalizes_legacy_slug_match_id_from_football_data(monkeypatch) -> None:
+    mod = load_module("blocked_recovery_test", SCRIPT_PATH)
+    monkeypatch.setattr(
+        mod,
+        "load_fixture_registry",
+        lambda: {"by_football_data_id": {"537351": {"local_ordinal_id": "M009"}}},
+    )
+    manifest = {"match_id": "GER-CUW", "football_data_id": 537351, "match": {"match_id": "GER-CUW"}}
+
+    actions = mod.canonicalize_manifest_match_id_for_recovery(manifest)
+
+    assert actions == ["canonicalize_match_id"]
+    assert manifest["match_id"] == "M009"
+    assert manifest["match"]["match_id"] == "M009"
+
+
+def test_recovery_downgrades_legacy_crossbook_misdeclared_as_devig(tmp_path: Path) -> None:
+    mod = load_module("blocked_recovery_test", SCRIPT_PATH)
+    workspace = tmp_path / "workspace"
+    manifest_path = workspace / "reports" / "artifacts" / "manifest-GER-CUW.json"
+    crossbook_path = write_json(
+        workspace / "reports" / "artifacts" / "crossbook-GER-CUW.json",
+        {"artifact_type": "crossbook_scan", "provides": ["path_a_crossbook"]},
+    )
+    manifest = {
+        "match_id": "GER-CUW",
+        "report_completeness": "complete",
+        "final_status": "pass_incomplete",
+        "source_quality": "A",
+        "source_quality_cap": "A",
+        "analysis_gates": {"devig_three_method": "pass"},
+        "artifacts": [
+            {
+                "artifact_id": "crossbook:ger-cuw",
+                "artifact_type": "crossbook_scan",
+                "path": str(crossbook_path),
+                "provides": ["path_a_crossbook", "devig_1x2", "asian_handicap", "totals"],
+            }
+        ],
+    }
+
+    actions = mod.normalize_legacy_direct_manifest_for_recovery(manifest, manifest_path)
+
+    assert actions == ["downgrade_legacy_misdeclared_devig"]
+    assert manifest["artifacts"][0]["provides"] == ["path_a_crossbook", "asian_handicap", "totals"]
+    assert manifest["analysis_gates"]["devig_three_method"] == "skipped_missing_source"
+    assert manifest["report_completeness"] == "partial"
+    assert manifest["final_status"] == "watch"
+    assert manifest["source_quality_cap"] == "C"
+    assert manifest["actionable_allowed"] is False
+    assert manifest["skipped_sections"][0]["gate"] == "devig_three_method"
+
+
+def test_recovery_patches_report_headers_after_manifest_downgrade(tmp_path: Path) -> None:
+    mod = load_module("blocked_recovery_test", SCRIPT_PATH)
+    report_path = tmp_path / "report.md"
+    report_path.write_text(
+        "\n".join(
+            [
+                "# report",
+                "mode: live",
+                "report_completeness: complete",
+                "source_quality: A",
+                "source_quality_cap: A",
+                "final_status: pass_incomplete",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    manifest = {"match_id": "M009", "report_completeness": "partial", "source_quality": "A", "source_quality_cap": "C", "final_status": "watch"}
+
+    changed = mod.patch_report_headers_for_manifest(report_path, manifest)
+
+    text = report_path.read_text(encoding="utf-8")
+    assert changed is True
+    assert "report_completeness: partial" in text
+    assert "source_quality_cap: C" in text
+    assert "final_status: watch" in text
+
+
+def test_existing_guarded_report_with_blocked_schedule_role_engine_is_repaired(tmp_path: Path, monkeypatch) -> None:
+    mod = load_module("blocked_recovery_test", SCRIPT_PATH)
+    workspace = tmp_path / "workspace"
+    mod.WORKSPACE = workspace
+    mod.ARTIFACTS_DIR = workspace / "reports" / "artifacts"
+
+    manifest_path = workspace / "reports" / "artifacts" / "manifest-GER-CUW.json"
+    report_path = workspace / "reports" / "match" / "GER-CUW.md"
+    write_json(
+        manifest_path,
+        {
+            "match_id": "GER-CUW",
+            "home": "Germany",
+            "away": "Curaçao",
+            "report_completeness": "complete",
+            "report_path": str(report_path),
+            "analysis_gates": {"role_engine": "blocked_schedule", "mechanism_audit": "pass", "path_c_consistency": "pass"},
+            "artifacts": [
+                {"artifact_id": "crossbook:ger-cuw", "artifact_type": "crossbook_scan", "provides": ["path_a_crossbook"]},
+                {"artifact_id": "pathc:ger-cuw", "artifact_type": "consistency_triangle", "provides": ["path_c_consistency"], "market_profile": {"contract": "wc26.market_profile.v1"}},
+                {"artifact_id": "mechanism:ger-cuw", "artifact_type": "mechanism_audit", "provides": ["mechanism_audit"]},
+            ],
+        },
+    )
+    report_path.parent.mkdir(parents=True)
+    report_path.write_text("WC26 GER-CUW report without role engine\n", encoding="utf-8")
+    called = {}
+
+    def fake_recover(event, recovery_id):
+        called["event"] = event
+        called["recovery_id"] = recovery_id
+        return {"status": "recovered", "summary": "SUMMARY WITH ROLE ENGINE"}
+
+    monkeypatch.setattr(mod, "recover_missing_artifacts", fake_recover)
+
+    result = mod.recover_missing_guarded_report({"match_id": "GER-CUW", "reason": "role_engine blocked_schedule"})
+
+    assert result["status"] == "recovered"
+    assert called["event"]["manifest_path"] == str(manifest_path)
+    assert called["event"]["report_path"] == str(report_path)
+
+
 def test_existing_guarded_report_with_path_c_stub_is_repaired(tmp_path: Path, monkeypatch) -> None:
     mod = load_module("blocked_recovery_test", SCRIPT_PATH)
     workspace = tmp_path / "workspace"
