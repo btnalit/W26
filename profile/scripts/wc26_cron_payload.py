@@ -69,6 +69,10 @@ DEVIG = load_module(
     "devig",
     SCRIPT_DIR.parent / "skills" / "odds-analysis" / "scripts" / "devig.py",
 )
+NO_PLAY_CLASSIFIER = load_module(
+    "no_play_classifier",
+    SCRIPT_DIR.parent / "skills" / "odds-analysis" / "scripts" / "no_play_classifier.py",
+)
 
 
 def utc_now() -> str:
@@ -1697,6 +1701,54 @@ def postmatch_grade() -> int:
             actual_outcome,
             context_flags,
         )
+        matchday_raw = None
+        stage_raw = None
+        if isinstance(report_manifest.get("match"), dict):
+            matchday_raw = report_manifest["match"].get("matchday")
+            stage_raw = report_manifest["match"].get("stage")
+        matchday_raw = matchday_raw if matchday_raw is not None else fm.get("matchday")
+        stage_raw = str(stage_raw or fm.get("stage") or "GROUP_STAGE")
+        try:
+            md_int = int(matchday_raw) if matchday_raw is not None else None
+        except Exception:
+            md_int = None
+        if stage_raw.upper() != "GROUP_STAGE":
+            reflection_phase = "knockout"
+        elif md_int == 1:
+            reflection_phase = "opener"
+        elif md_int == 2:
+            reflection_phase = "group_mid"
+        elif md_int == 3:
+            reflection_phase = "group_final"
+        else:
+            reflection_phase = "unknown"
+        actual_total_goals = int(score_h) + int(score_a)
+        actual_over25 = actual_total_goals > 2.5
+        market_over25_implied = None
+        for art in report_manifest.get("artifacts", []):
+            if not isinstance(art, dict):
+                continue
+            if "totals" not in artifact_caps(art):
+                continue
+            totals_payload = load_artifact_payload(art, report_manifest_path)
+            if isinstance(totals_payload, dict):
+                for key in ("market_over25_implied", "no_vig_over", "over25_prob", "over_implied"):
+                    if totals_payload.get(key) is not None:
+                        try:
+                            market_over25_implied = float(totals_payload.get(key))
+                        except Exception:
+                            market_over25_implied = None
+                        break
+            if market_over25_implied is not None:
+                break
+        favorite_side = "home" if close_odds_raw and home else None
+        favorite_covered_main_handicap = None
+        reflection_payload = report_manifest.get("reflection_layer") if isinstance(report_manifest.get("reflection_layer"), dict) else {}
+        nop_payload = reflection_payload.get("no_play_classification") if isinstance(reflection_payload.get("no_play_classification"), dict) else None
+        if isinstance(nop_payload, dict):
+            nop_backfilled = NO_PLAY_CLASSIFIER.backfill_direction_hit(nop_payload, {"home_score": score_h, "away_score": score_a})
+        else:
+            nop_backfilled = None
 
         # --- Build Section 11 text ---
         graded_at = utc_now()
@@ -1765,6 +1817,15 @@ def postmatch_grade() -> int:
             "timing_class": report_field(text, "timing_class", str(report_manifest.get("timing_class") or "")),
             "source_quality_cap": report_field(text, "source_quality_cap", str(report_manifest.get("source_quality_cap") or report_manifest.get("source_quality") or "")),
             "final_status": fs,
+            "phase": reflection_phase,
+            "actual_total_goals": actual_total_goals,
+            "actual_over25": actual_over25,
+            "market_over25_implied": market_over25_implied,
+            "favorite_side": favorite_side,
+            "favorite_covered_main_handicap": favorite_covered_main_handicap,
+            "no_play_type": nop_backfilled.get("type") if isinstance(nop_backfilled, dict) else None,
+            "blocked_direction": nop_backfilled.get("direction_if_any") if isinstance(nop_backfilled, dict) else None,
+            "post_result_direction_hit": nop_backfilled.get("post_result_direction_hit") if isinstance(nop_backfilled, dict) else None,
             "entry_price": entry_price_str,
             "model_probs": model_probs,
             "p_adj_actual_outcome": p_adj_actual,

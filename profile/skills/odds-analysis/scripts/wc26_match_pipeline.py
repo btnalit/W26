@@ -40,6 +40,9 @@ fixture_registry = load_module("fixture_registry", SCRIPT_DIR / "fixture_registr
 motivation_context = load_module("motivation_context", SCRIPT_DIR / "motivation_context.py")
 role_engine = load_module("role_engine", SCRIPT_DIR / "role_engine.py")
 mechanism_audit = load_module("mechanism_audit", SCRIPT_DIR / "mechanism_audit.py")
+phase_context = load_module("phase_context", SCRIPT_DIR / "phase_context.py")
+bias_mirror = load_module("bias_mirror", SCRIPT_DIR / "bias_mirror.py")
+no_play_classifier = load_module("no_play_classifier", SCRIPT_DIR / "no_play_classifier.py")
 
 
 def parse_utc(raw: str) -> datetime:
@@ -124,6 +127,112 @@ def build_motivation_artifact(args: argparse.Namespace, artifact_dir: Path, fixt
         "source_snapshot_id": artifact.get("standings_snapshot_id"),
     }
     return artifact, manifest_entry
+
+
+def _load_settled_ledger(path: Path | None) -> list[dict[str, Any]]:
+    payload = _load_optional_json(path)
+    if isinstance(payload, list):
+        return [row for row in payload if isinstance(row, dict)]
+    if isinstance(payload, dict):
+        for key in ("records", "cards", "ledger", "items"):
+            rows = payload.get(key)
+            if isinstance(rows, list):
+                return [row for row in rows if isinstance(row, dict)]
+    return []
+
+
+def _load_artifact_payload(entry: dict[str, Any]) -> dict[str, Any] | None:
+    raw = entry.get("path")
+    if not raw:
+        return None
+    try:
+        payload = json.loads(Path(str(raw)).read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _market_profile_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
+    for entry in manifest.get("artifacts", []):
+        if not isinstance(entry, dict):
+            continue
+        provides = entry.get("provides") if isinstance(entry.get("provides"), list) else []
+        if entry.get("artifact_type") == "consistency_triangle" or "path_c_consistency" in provides:
+            payload = _load_artifact_payload(entry)
+            profile = payload.get("market_profile") if isinstance(payload, dict) else None
+            if isinstance(profile, dict):
+                return profile
+    return {}
+
+
+def _deep_research_payload(args: argparse.Namespace) -> dict[str, Any]:
+    payload = _load_optional_json(getattr(args, "deep_research_path", None))
+    return payload if isinstance(payload, dict) else {}
+
+
+def build_reflection_layer(args: argparse.Namespace, manifest: dict[str, Any], fixture: dict[str, Any]) -> dict[str, Any]:
+    settled_ledger = _load_settled_ledger(getattr(args, "settled_ledger_path", None))
+    standings = _load_optional_json(getattr(args, "standings_path", None))
+    remaining = _load_optional_json(getattr(args, "remaining_fixtures_path", None))
+    rules = _load_optional_json(getattr(args, "advancement_rules_path", None))
+    phase = phase_context.analyze_phase_context(
+        fixture,
+        settled_ledger,
+        standings=standings,
+        group_remaining_fixtures=remaining,
+        advancement_rules=rules,
+    )
+    # Existing top-level motivation_context remains for backward compatibility;
+    # group_final also appears inside phase_context as the unified phase submodule.
+    if phase.get("phase") != "group_final":
+        phase["motivation_context"] = None
+    mirror = bias_mirror.analyze_bias_mirror(_market_profile_from_manifest(manifest), phase)
+    final_inputs = {
+        "final_status": manifest.get("final_status"),
+        "relay_actionable": manifest.get("relay_actionable", manifest.get("qualified_play_count", 0)),
+        "qualified_play_count": manifest.get("qualified_play_count", 0),
+    }
+    classification = no_play_classifier.classify_no_play(final_inputs, _deep_research_payload(args))
+    reflection = {
+        "artifact_field": "reflection_layer",
+        "contract": "wc26.reflection_layer.v1",
+        "phase_context": phase,
+        "bias_mirror": mirror,
+        "no_play_classification": classification,
+        "footnote_zh": "复盘辅助层·裁定后诊断附录·描述性·非下注信号;不改变既有裁定。",
+    }
+    return reflection
+
+
+def append_reflection_artifacts(manifest: dict[str, Any], artifact_dir: Path, reflection: dict[str, Any], fixture: dict[str, Any]) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    reflection_artifact_contracts = {
+        "phase_context": {"artifact_type": "phase_context", "provides": ["phase_context"], "script": "phase_context.py"},
+        "bias_mirror": {"artifact_type": "bias_mirror", "provides": ["bias_mirror"], "script": "bias_mirror.py"},
+        "no_play_classification": {"artifact_type": "no_play_classification", "provides": ["no_play_classification"], "script": "no_play_classifier.py"},
+    }
+    for capability, contract in reflection_artifact_contracts.items():
+        payload = reflection.get(capability)
+        script = contract["script"]
+        if not isinstance(payload, dict):
+            continue
+        artifact_id = f"{capability}:{fixture['match_id']}:{stable_slug([fixture['match_id'], capability, json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)])}"
+        payload["artifact_id"] = artifact_id
+        path = artifact_dir / f"{artifact_id.replace(':', '-')}.json"
+        write_json(path, payload)
+        entry = {
+            "artifact_id": artifact_id,
+            "artifact_type": capability,
+            "script": script,
+            "path": str(path),
+            "provides": [capability],
+        }
+        manifest.setdefault("artifacts", []).append(entry)
+        caps = manifest.setdefault("artifact_capabilities", [])
+        if isinstance(caps, list) and capability not in caps:
+            caps.append(capability)
+        entries.append(entry)
+    return entries
 
 
 def append_role_engine_artifact(manifest: dict[str, Any], manifest_path: Path, artifact_dir: Path) -> dict[str, Any]:
@@ -292,6 +401,13 @@ def report_text(args: argparse.Namespace, fixture: dict[str, Any], manifest_path
     final_status = manifest["final_status"]
     motivation = manifest.get("motivation_context", {})
     motivation_hint = motivation.get("model_hint", {}) if isinstance(motivation, dict) else {}
+    reflection = manifest.get("reflection_layer") if isinstance(manifest.get("reflection_layer"), dict) else {}
+    phase = reflection.get("phase_context") if isinstance(reflection.get("phase_context"), dict) else {}
+    mirror = reflection.get("bias_mirror") if isinstance(reflection.get("bias_mirror"), dict) else {}
+    no_play = reflection.get("no_play_classification") if isinstance(reflection.get("no_play_classification"), dict) else {}
+    phase_priors = phase.get("phase_priors") if isinstance(phase.get("phase_priors"), dict) else {}
+    total_prior = phase_priors.get("total_goals") if isinstance(phase_priors.get("total_goals"), dict) else {}
+    mirror_rows = mirror.get("mirrors") if isinstance(mirror.get("mirrors"), list) else []
     mode_note = "synthetic no-paid canary" if args.mode == "simulation" else "live cached snapshot"
     source_snapshot = scalar_artifact["source_snapshot_id"]
     ah_snapshot = ah_artifact["source_snapshot_id"]
@@ -406,6 +522,17 @@ def report_text(args: argparse.Namespace, fixture: dict[str, Any], manifest_path
             "review_required: false",
             "next_check: fresh real snapshot when the scheduled window arrives",
             "",
+            "## 10. 复盘诊断附录(描述性)",
+            "",
+            f"- reflection_contract: {reflection.get('contract', 'wc26.reflection_layer.v1')}",
+            f"- 阶段先验: phase={phase.get('phase', 'unknown')} matchday={phase.get('matchday', 'N/A')} "
+            f"over25={total_prior.get('ledger_value', 'N/A')} market_avg={total_prior.get('market_implied_avg', 'N/A')} "
+            f"bias={total_prior.get('bias_direction', 'N/A')} n={total_prior.get('sample_n', 0)} confidence={total_prior.get('confidence', 'N/A')}",
+            "- 偏差校正镜: " + (" / ".join(f"{row.get('dimension')}={row.get('alignment')}" for row in mirror_rows if isinstance(row, dict)) or "N/A"),
+            f"- NO PLAY分类: type={no_play.get('type', 'N/A')} direction={no_play.get('direction_if_any', 'N/A')} hit={no_play.get('post_result_direction_hit', None)}",
+            f"- footnote: {reflection.get('footnote_zh', '复盘辅助层·描述性·非下注信号')}",
+            "- discipline: never_actionable=true; does_not_modify_p_adj=true; does_not_modify_gate=true",
+            "",
             "## 11. Post-Match Grading Slot",
             "",
             "closing_line:",
@@ -433,6 +560,10 @@ def compile_report(args: argparse.Namespace) -> dict[str, Any]:
     role_artifact = append_role_engine_artifact(manifest, manifest_path, artifact_dir)
     write_json(manifest_path, manifest)
     append_mechanism_audit_artifact(manifest, manifest_path, artifact_dir)
+    write_json(manifest_path, manifest)
+    reflection = build_reflection_layer(args, manifest, fixture)
+    manifest["reflection_layer"] = reflection
+    append_reflection_artifacts(manifest, artifact_dir, reflection, fixture)
     write_json(manifest_path, manifest)
 
     contract_result = report_contract.validate_manifest(manifest, manifest_path)
@@ -502,6 +633,8 @@ def main() -> int:
     parser.add_argument("--standings-path", type=Path)
     parser.add_argument("--remaining-fixtures-path", type=Path)
     parser.add_argument("--advancement-rules-path", type=Path)
+    parser.add_argument("--settled-ledger-path", type=Path)
+    parser.add_argument("--deep-research-path", type=Path)
     args = parser.parse_args()
 
     result = compile_report(args)

@@ -204,6 +204,57 @@
         }
       ],
       "notes": "Group-stage motivation context. matchday<3 returns NONE. Qualitative-only."
+    },
+    {
+      "capability": "phase_context",
+      "producer": "phase_context.py",
+      "orchestrators": [
+        {
+          "path": "profile/skills/odds-analysis/scripts/wc26_match_pipeline.py",
+          "generation_call_markers": [
+            "build_reflection_layer("
+          ],
+          "manifest_markers": [
+            "\"artifact_type\": \"phase_context\"",
+            "\"provides\": [\"phase_context\"]"
+          ]
+        }
+      ],
+      "notes": "Reflection layer diagnostic-only producer. Runs after final decision and never changes p_adj/gate/final_status."
+    },
+    {
+      "capability": "bias_mirror",
+      "producer": "bias_mirror.py",
+      "orchestrators": [
+        {
+          "path": "profile/skills/odds-analysis/scripts/wc26_match_pipeline.py",
+          "generation_call_markers": [
+            "build_reflection_layer("
+          ],
+          "manifest_markers": [
+            "\"artifact_type\": \"bias_mirror\"",
+            "\"provides\": [\"bias_mirror\"]"
+          ]
+        }
+      ],
+      "notes": "Reflection layer diagnostic-only producer. Runs after final decision and never changes p_adj/gate/final_status."
+    },
+    {
+      "capability": "no_play_classification",
+      "producer": "no_play_classifier.py",
+      "orchestrators": [
+        {
+          "path": "profile/skills/odds-analysis/scripts/wc26_match_pipeline.py",
+          "generation_call_markers": [
+            "build_reflection_layer("
+          ],
+          "manifest_markers": [
+            "\"artifact_type\": \"no_play_classification\"",
+            "\"provides\": [\"no_play_classification\"]"
+          ]
+        }
+      ],
+      "notes": "Reflection layer diagnostic-only producer. Runs after final decision and never changes p_adj/gate/final_status."
     }
   ],
   "report_consumed_capabilities": [

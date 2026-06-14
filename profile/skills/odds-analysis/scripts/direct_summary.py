@@ -267,6 +267,12 @@ def artifact_caps(artifact: dict[str, Any], payload: dict[str, Any] | None) -> s
         caps.add("mechanism_audit")
     if "role_engine" in raw:
         caps.add("role_engine")
+    if "phase_context" in raw:
+        caps.add("phase_context")
+    if "bias_mirror" in raw:
+        caps.add("bias_mirror")
+    if "no_play_classification" in raw:
+        caps.add("no_play_classification")
     return caps
 
 
@@ -610,6 +616,32 @@ def build_summary(manifest_path: str | Path, report_path: str | Path | None = No
                 )
     else:
         lines.append("- gate: mechanism_audit missing | 缺机器生成的 mechanism_audit artifact")
+
+    lines.extend(["", "⑩A 复盘诊断附录"])
+    reflection = manifest.get("reflection_layer") if isinstance(manifest.get("reflection_layer"), dict) else {}
+    phase_payload = reflection.get("phase_context") if isinstance(reflection.get("phase_context"), dict) else (artifacts.get("phase_context", ({}, None))[1] if artifacts.get("phase_context") else None)
+    mirror_payload = reflection.get("bias_mirror") if isinstance(reflection.get("bias_mirror"), dict) else (artifacts.get("bias_mirror", ({}, None))[1] if artifacts.get("bias_mirror") else None)
+    nop_payload = reflection.get("no_play_classification") if isinstance(reflection.get("no_play_classification"), dict) else (artifacts.get("no_play_classification", ({}, None))[1] if artifacts.get("no_play_classification") else None)
+    if isinstance(phase_payload, dict):
+        priors = phase_payload.get("phase_priors") if isinstance(phase_payload.get("phase_priors"), dict) else {}
+        total = priors.get("total_goals") if isinstance(priors.get("total_goals"), dict) else {}
+        lines.append(
+            f"- 阶段先验: phase={phase_payload.get('phase', 'N/A')} n={total.get('sample_n', 0)} "
+            f"bias={total.get('bias_direction', 'N/A')} confidence={total.get('confidence', 'N/A')}"
+        )
+    else:
+        lines.append("- 阶段先验: 未运行")
+    if isinstance(mirror_payload, dict):
+        mirrors = mirror_payload.get("mirrors") if isinstance(mirror_payload.get("mirrors"), list) else []
+        rendered = " / ".join(f"{row.get('dimension')}={row.get('alignment')}" for row in mirrors if isinstance(row, dict))
+        lines.append(f"- 偏差校正镜: {rendered or 'N/A'}")
+    else:
+        lines.append("- 偏差校正镜: 未运行")
+    if isinstance(nop_payload, dict):
+        lines.append(f"- NO PLAY分类: {nop_payload.get('type', 'N/A')} | direction={nop_payload.get('direction_if_any', 'N/A')}")
+    else:
+        lines.append("- NO PLAY分类: 不适用/未运行")
+    lines.append("- 脚注: 复盘辅助层·裁定后诊断附录·描述性·非下注信号;不改变既有裁定。")
 
     lines.extend(
         [
