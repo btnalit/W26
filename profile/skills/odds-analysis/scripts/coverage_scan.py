@@ -192,13 +192,10 @@ def _meta_manifest(data, path_str):
 
 def _meta_crossbook(data, path_str):
     h2h = (data.get("markets") or {}).get("h2h", {})
-    summary = data.get("summary", {})
     return {
         "has_crossbook": True,
         "crossbook_path": path_str,
-        "crossbook_edge_count": h2h.get("edge_count") or summary.get("edge_count"),
-        "crossbook_actionable_count": h2h.get("actionable_count") or summary.get("actionable_count", 0),
-        "crossbook_qualified_play_count": h2h.get("qualified_play_count") or summary.get("qualified_play_count", 0),
+        "crossbook_edge_count": h2h.get("edge_count"),
     }
 
 
@@ -280,66 +277,10 @@ def _load_reviews(workspace):
 
 
 # ---------------------------------------------------------------------------
-# Review worthiness triage
-# ---------------------------------------------------------------------------
-
-# Priority tiers:
-#   1 — MUST review (claimed edge or directional observation)
-#   2 — SHOULD review (watch with anomaly, or result available)
-#   3 — CAN review (low-priority completeness)
-#   0 — SKIP (no signal, mechanical gap only, or no analysis)
-
-def compute_review_worthiness(row):
-    """Return (worth_it: bool, reason: str, priority: int)."""
-    status = row.get("manifest_final_status") or ""
-    edges = row.get("crossbook_edge_count") or 0
-    actionable = row.get("crossbook_actionable_count") or 0
-    has_result = bool(row.get("grading_result"))
-    gaps = row.get("gaps", [])
-
-    # Tier 1: Claimed edge — always review
-    if status == "qualified_play":
-        return True, "claimed_edge", 1
-    if status == "lean":
-        return True, "directional_observation", 1
-
-    # Tier 2: Watch with actionable signal or result available
-    if status == "watch" and actionable > 0:
-        return True, "watch_with_actionable_anomaly", 2
-    if status == "watch" and has_result:
-        return True, "watch_with_known_result", 2
-    if actionable > 0 and status in ("pass_incomplete", "pass"):
-        return True, "actionable_edge_existed", 2
-    # Noise edges (>0 total but 0 actionable) on heavy favorite → skip
-    if edges > 0 and actionable == 0 and status in ("pass_incomplete", "pass", "watch"):
-        return False, "noise_edges_only_no_review_value", 0
-
-    # Tier 3: Needs grading card for completeness (has manifest, no card)
-    if "no_grading_card" in gaps and row.get("has_manifest"):
-        return True, "needs_grading_card_for_completeness", 3
-
-    # Tier 0: No analysis — can't review nothing
-    if "no_analysis" in gaps:
-        return False, "no_analysis_to_review", 0
-
-    # Tier 0: Pure pass/pass_incomplete/watch with 0 edges, card exists or not
-    if status in ("pass", "pass_incomplete", "watch") and edges == 0 and not has_result:
-        if row.get("has_grading_card"):
-            return False, "no_edge_no_surprise_result", 0
-        return False, "no_edge_mechanical_gap_only", 0
-
-    # Default: anything else with gaps is low priority
-    if gaps:
-        return False, "mechanical_gaps_only", 0
-
-    return False, "complete_no_gaps", 0
-
-
-# ---------------------------------------------------------------------------
 # Main scan
 # ---------------------------------------------------------------------------
 
-def scan(workspace, from_date, to_date, pending_only=False, review_worthy_only=False):
+def scan(workspace, from_date, to_date, pending_only=False):
     fixtures_all = load_fixtures(workspace)
 
     # Filter by date range
@@ -419,8 +360,6 @@ def scan(workspace, from_date, to_date, pending_only=False, review_worthy_only=F
             "has_crossbook": m.get("has_crossbook", False),
             "crossbook_path": m.get("crossbook_path"),
             "crossbook_edge_count": m.get("crossbook_edge_count"),
-            "crossbook_actionable_count": m.get("crossbook_actionable_count", 0),
-            "crossbook_qualified_play_count": m.get("crossbook_qualified_play_count", 0),
             "has_consistency": m.get("has_consistency", False),
             "consistency_path": m.get("consistency_path"),
             "has_mechanism_audit": m.get("has_mechanism_audit", False),
@@ -446,18 +385,10 @@ def scan(workspace, from_date, to_date, pending_only=False, review_worthy_only=F
         row["gaps"] = gaps
         row["coverage_complete"] = len(gaps) == 0
 
-        # Review worthiness triage
-        worthy, reason, priority = compute_review_worthiness(row)
-        row["review_worthiness"] = worthy
-        row["review_worthiness_reason"] = reason
-        row["review_worthiness_priority"] = priority
-
         rows.append(row)
 
     if pending_only:
         rows = [r for r in rows if r["gaps"]]
-    if review_worthy_only:
-        rows = [r for r in rows if r.get("review_worthiness")]
 
     return {
         "scan_utc": datetime.now(timezone.utc).isoformat(),
@@ -478,7 +409,6 @@ def main():
     parser.add_argument("--from", dest="from_date", help="Start date YYYY-MM-DD (default: today UTC)")
     parser.add_argument("--to", dest="to_date", help="End date YYYY-MM-DD (default: same as --from)")
     parser.add_argument("--pending-only", action="store_true", help="Only rows with coverage gaps")
-    parser.add_argument("--review-worthy-only", action="store_true", help="Only rows worth reviewing (triage filter)")
     parser.add_argument("--summary", action="store_true", help="Counts only")
     args = parser.parse_args()
 
@@ -486,7 +416,7 @@ def main():
     from_date = datetime.fromisoformat(args.from_date).date() if args.from_date else today
     to_date = datetime.fromisoformat(args.to_date).date() if args.to_date else from_date
 
-    result = scan(args.workspace, from_date, to_date, pending_only=args.pending_only, review_worthy_only=args.review_worthy_only)
+    result = scan(args.workspace, from_date, to_date, pending_only=args.pending_only)
 
     if args.summary:
         rows = result["matches"]
@@ -503,13 +433,6 @@ def main():
             "has_grading_card": sum(1 for r in rows if r["has_grading_card"]),
             "reviewed": sum(1 for r in rows if r["is_reviewed"]),
             "with_gaps": sum(1 for r in rows if r["gaps"]),
-            "review_worthy": sum(1 for r in rows if r.get("review_worthiness")),
-            "review_worthy_by_priority": {
-                "1_must": sum(1 for r in rows if r.get("review_worthiness_priority") == 1),
-                "2_should": sum(1 for r in rows if r.get("review_worthiness_priority") == 2),
-                "3_can": sum(1 for r in rows if r.get("review_worthiness_priority") == 3),
-                "0_skip": sum(1 for r in rows if r.get("review_worthiness_priority") == 0),
-            },
         }, indent=2))
     else:
         print(json.dumps(result, indent=2, default=str))
