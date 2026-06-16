@@ -662,19 +662,13 @@ explicitly broaden the scope.
 ### Step 0: Run coverage_scan.py (replaces old multi-step dance)
 
 ```bash
-# Full audit: all matches with coverage gaps
 python3 /root/.hermes/profiles/wc26-handicap-analyst/skills/odds-analysis/scripts/coverage_scan.py \
   --from $(date -u +%Y-%m-%d) --pending-only
-
-# Triage view: only matches worth reviewing (filters noise edges, no-analysis, etc.)
-python3 /root/.hermes/profiles/wc26-handicap-analyst/skills/odds-analysis/scripts/coverage_scan.py \
-  --from $(date -u +%Y-%m-%d) --review-worthy-only
 ```
 
 This single command scans all data islands and outputs every match's coverage
 status (report, manifest, crossbook, consistency, audit, deep-research, grading
-card, review) with `review_worthiness` triage (P1=must, P2=should, P3=can, P0=skip).
-See `## Script Entry Points → coverage_scan.py` for details.
+card, review). See `## Script Entry Points → coverage_scan.py` for details.
 
 ### Step 1: Load Grading Cards
 
