@@ -76,10 +76,23 @@ Shin no-vig requires solving for z numerically; when the crossbook artifact
 
 ### Step D: Compute Metrics
 
-**CLV direction**: probability shift toward the actual outcome:
+**CLV**: Respect the grading card's CLV when it exists — it has correct market
+attribution (`clv_detail.market`). Do NOT recompute CLV from h2h no-vig
+probabilities when a grading card already provides a market-specific CLV.
+The grading card CLV is computed on the market where the report took its
+primary position (typically spreads or totals), not on the match outcome.
+
+When no grading card exists, CLV can be computed as probability shift toward
+the actual outcome:
 ```
-prob_shift = close_probs[outcome_idx] - report_probs[outcome_idx]
+prob_shift_pp = (close_probs[outcome_idx] - report_probs[outcome_idx]) * 100
 ```
+
+Mark this as "h2h probability shift (pp)" — NOT as "CLV" — to distinguish
+it from market-level CLV. If the actual outcome had <10% report probability
+and the report was NO PLAY, mark it `not_meaningful` instead of computing a
+spurious CLV number. A +7.9% CLV on a 6.9% draw that nobody would have
+positioned on is noise dressed as signal.
 
 **Brier score** (value range [0, 2], lower is better):
 

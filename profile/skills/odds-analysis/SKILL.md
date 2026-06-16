@@ -740,12 +740,19 @@ Do not fabricate CLV numbers by comparing the report snapshot against itself
 
 For each match, compute:
 
-1. **CLV**: Compare report Pinnacle odds to closing Pinnacle odds.
-   - Direction: did the market move toward or away from the report's
-     probability?
-   - Magnitude: compute Shin no-vig probability shift (in percentage points).
-   - For NO PLAY reports (no edge claimed): note direction of market movement
-     relative to actual result as a market-efficiency signal.
+1. **CLV**: When a grading card exists with `clv_detail.market`, use its
+   CLV — do not recompute from h2h probabilities. The grading card CLV is
+   measured on the market where the report took its primary position
+   (typically spreads or totals), not on the match outcome. Switching CLV
+   markets silently changes the measurement object while keeping the same
+   field name — this is a口径漂移 bug.
+
+   When no grading card exists, compute h2h probability shift toward the
+   actual outcome in percentage points. Label it "h2h prob shift (pp)" —
+   NOT "CLV" — to distinguish market-level CLV from outcome-level drift.
+   If the actual outcome had <10% report probability and the report was
+   NO PLAY, mark it `not_meaningful`. A spurious +7.9% CLV on a 6.9%
+   draw that nobody would have positioned on is noise dressed as signal.
 
 2. **Brier score**: `Σ(p_i - o_i)²` where o_i=1 for the actual outcome, 0
    otherwise. Range [0, 2]. Compute using Shin no-vig probabilities from the
