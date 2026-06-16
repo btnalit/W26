@@ -35,6 +35,28 @@ PATH_C_LEDGER_DIR = GRADING_DIR / "path_c_signal_ledger"
 DIMENSION_SCORE_LEDGER_PATH = GRADING_DIR / "dimension_score_ledger.json"
 
 
+def _resolve_skill_scripts_dir() -> pathlib.Path:
+    """Resolve the skill scripts directory in both source and production layouts.
+
+    Source: /root/W26/profile/scripts/ → skills at ../skills/odds-analysis/scripts/
+    Production: /wc26-profile/ → skills at $HERMES_HOME/profiles/wc26-handicap-analyst/skills/...
+    """
+    candidates = [
+        SCRIPT_DIR.parent / "skills" / "odds-analysis" / "scripts",   # source layout
+        pathlib.Path(ROOT_HERMES_HOME) / "profiles" / "wc26-handicap-analyst" / "skills" / "odds-analysis" / "scripts",  # production layout
+        SCRIPT_DIR / "skills" / "odds-analysis" / "scripts",           # flat profile layout
+    ]
+    for c in candidates:
+        if (c / "fixture_registry.py").exists():
+            return c
+    raise FileNotFoundError(
+        f"Cannot resolve skill scripts directory. Tried: {[str(c) for c in candidates]}"
+    )
+
+
+SKILL_SCRIPTS = _resolve_skill_scripts_dir()
+
+
 WINDOW_SPECS = [
     ("T-72h_early", "early_structural", 60.0, 84.0),
     ("T-24h_confirm", "confirmation", 18.0, 30.0),
@@ -64,19 +86,19 @@ def load_module(name: str, path: pathlib.Path):
 
 FIXTURE_REGISTRY = load_module(
     "fixture_registry",
-    SCRIPT_DIR.parent / "skills" / "odds-analysis" / "scripts" / "fixture_registry.py",
+    SKILL_SCRIPTS / "fixture_registry.py",
 )
 DEVIG = load_module(
     "devig",
-    SCRIPT_DIR.parent / "skills" / "odds-analysis" / "scripts" / "devig.py",
+    SKILL_SCRIPTS / "devig.py",
 )
 NO_PLAY_CLASSIFIER = load_module(
     "no_play_classifier",
-    SCRIPT_DIR.parent / "skills" / "odds-analysis" / "scripts" / "no_play_classifier.py",
+    SKILL_SCRIPTS / "no_play_classifier.py",
 )
 DIMENSION_SCORER = load_module(
     "dimension_scorer",
-    SCRIPT_DIR.parent / "skills" / "odds-analysis" / "scripts" / "dimension_scorer.py",
+    SKILL_SCRIPTS / "dimension_scorer.py",
 )
 
 
