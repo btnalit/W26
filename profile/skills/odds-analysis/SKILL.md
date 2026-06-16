@@ -104,40 +104,123 @@ All market math uses normalized decimal odds greater than `1.0`.
 - `devig.py` rejects decimal odds `<= 1.0`; do not silently treat water
   `0.95` as decimal `0.95`.
 
-Every report number used for no-vig probability, edge, EV, robust EV, Kelly,
-or Asian settlement must come from deterministic JSON, not freeform report
-prose. Prefer the compiler boundary first:
+## Script Locations
 
-```bash
-python3 scripts/wc26-match-analyze.py \
-  --snapshot snapshots/odds/the-odds-api-multibook-20260604T120000Z.json \
-  --match-home "Mexico" --match-away "South Africa" \
-  --match-id M001 --window T-72h_early \
-  --output reports/artifacts \
-  --mode full
+All analysis scripts live under the **skill directory**, not under the workspace:
+
+```
+~/.hermes/profiles/wc26-handicap-analyst/skills/odds-analysis/scripts/
 ```
 
-**Every match analysis MUST start with the orchestrator.** `wc26-match-analyze.py`
-is the only deterministic entry point for live direct reports. It runs the full
-chain: devig + crossbook + consistency_triangle + mechanism_audit + manifest + report,
-then writes 6+ artifacts and a guarded report. Do NOT skip it unless the match
-has zero path_a edges (fast path below).
-
-Do not replace orchestrator numbers with LLM-generated numbers. If a live task
-needs richer data, feed fresh snapshot values into the orchestrator first.
-
-**Fast path (0 edges, 0 actionable → NO PLAY):** Run only crossbook scan, skip
-full orchestrator:
+From the workspace at `/hermesdata/worldcup-2026-handicap/`, invoke them with the
+full path:
 
 ```bash
-python3 skills/odds-analysis/scripts/cross_book_scan.py \
+python3 /root/.hermes/profiles/wc26-handicap-analyst/skills/odds-analysis/scripts/cross_book_scan.py ...
+python3 /root/.hermes/profiles/wc26-handicap-analyst/skills/odds-analysis/scripts/consistency_triangle.py ...
+```
+
+The SKILL.md shorthand `python3 scripts/<name>.py` assumes you are inside the skill
+directory. When working from the workspace, use the full path. Do NOT assume
+`skills/odds-analysis/scripts/` exists as a symlink inside the workspace.
+
+## Snapshot Structure (the-odds-api multibook)
+
+The multibook snapshot JSON is a **dict** with keys:
+
+```python
+['captured_at_utc', 'source', 'bookmakers_filter', 'bookmaker_count', 'bookmakers', 'data']
+```
+
+Matches are a **list** under `data`. The outer dict is NOT a list of matches.
+When searching for a specific match programmatically:
+
+```python
+import json
+with open('snapshot.json') as f:
+    snapshot = json.load(f)
+for m in snapshot['data']:
+    if m['home_team'] == 'Canada' and 'Bosnia' in m['away_team']:
+        # found it
+```
+
+## Primary Workflow (Current Reality)
+
+**The `wc26-match-analyze.py` orchestrator is forward-looking. The**
+**`wc26_match_pipeline.py` script requires manual odds entry (flags only, no**
+**snapshot input — see `references/direct-report-pitfalls.md` #35).**
+
+As of 2026-06-10, the current primary workflow for live direct reports is:
+
+1. `direct_request_record.py` — create request identity
+2. `cross_book_scan.py` — Path A arithmetic scan (the core numeric artifact)
+3. `consistency_triangle.py` — Path C market profile (optional for NO PLAY)
+4. Build manifest JSON manually with artifact paths
+5. `mechanism_audit.py` — cross-check manifests/artifacts
+6. `rich_summary.py` — produce user-facing Telegram output
+7. Deep Research finalizer (Exa/Jina)
+
+When `cross_book_scan.py` returns 0 actionable edges, the fast path is sufficient
+(see below). For matches with actionable edges, the full manifest + report_contract
++ report_guard chain applies.
+
+## Fast Path: 0 Edges → NO PLAY
+
+When `cross_book_scan.py` returns `edge_count: 0` in h2h and all spreads edges are
+`suspect` (Pinnacle didn't price that AH line), the match is a clean NO PLAY.
+
+**Fast path procedure:**
+
+```bash
+# 1. Create request identity
+python3 /root/.hermes/profiles/wc26-handicap-analyst/skills/odds-analysis/scripts/direct_request_record.py \
+  --from-latest-session --request-text "Canada vs Bosnia-Herzegovina" \
+  --match-id "CAN-BIH" --match-label "Canada vs Bosnia & Herzegovina" \
+  --status received --header-lines
+
+# 2. Run crossbook scan
+python3 /root/.hermes/profiles/wc26-handicap-analyst/skills/odds-analysis/scripts/cross_book_scan.py \
   --input-snapshot snapshots/odds/the-odds-api-multibook-*.json \
   --output reports/artifacts/crossbook-{match}-{date}.json \
   --match-home "Canada" \
   --match-away "Bosnia & Herzegovina"
+
+# 3. Run consistency triangle (Path C)
+python3 /root/.hermes/profiles/wc26-handicap-analyst/skills/odds-analysis/scripts/consistency_triangle.py \
+  --snapshot snapshots/odds/the-odds-api-multibook-*.json \
+  --match "Canada vs Bosnia & Herzegovina" \
+  > reports/artifacts/consistency-{match}-{date}.json
+
+# 4. Build manifest JSON manually — use `references/fast-path-manifest-template.md` as starter
+#    CRITICAL: artifact `path` values must be BARE FILENAMES (e.g., "crossbook-...json"),
+#    NOT workspace-relative paths (e.g., "reports/artifacts/..."). mechanism_audit resolves
+#    paths relative to the manifest's parent directory. See pitfall #44.
+# 5. Run mechanism_audit from reports/artifacts/ directory (bare filenames required)
+# 6. Run rich_summary for Telegram output
 ```
 
-For custom calculations, use `numeric_artifact.py` / `devig.py` first, then cite:
+**Fast path skips:**
+- Full orchestrator (`wc26-match-analyze.py` — forward-looking)
+- `report_contract.py` / `report_guard.py` (crossbook output shape doesn't match
+  flat-format validator expectations for spreads/totals — see
+  `references/fast-path-gap.md`)
+- `role_engine.py` (not needed for NO PLAY)
+- Full Markdown report
+
+**Fast path still requires:**
+- `direct_request_record.py` for traceability
+- `cross_book_scan.py` artifact saved to `reports/artifacts/`
+- `consistency_triangle.py` artifact (provides `market_profile` for the summary)
+- `mechanism_audit.py` artifact
+- Manifest JSON binding all artifacts
+- `rich_summary.py` for the user-facing output
+- Deep Research finalizer (Exa/Jina — runs for all Telegram analyses)
+- Manual direct request record patching to `status: completed` after send
+
+**When NOT to use fast path:**
+- Any actionable edge exists even if it's only noise-candidate
+- T-60m or later windows (need full contract for late-line edge detection)
+- Deep research surfaces material post-snapshot news
 
 ```yaml
 snapshot_id:
@@ -198,6 +281,13 @@ fixture_status:
 
 If official fixture facts are missing or conflicting, block.
 
+**Timezone guard**: The conversation start date metadata (e.g., "Monday, June 15,
+2026") may be in a timezone different from UTC (CST/Asia/Shanghai). Never
+conclude a match has already kicked off based on the conversation date alone.
+Always run `date -u` and compare `kickoff_utc` from `fixture_registry.py`
+against actual UTC. See `references/direct-report-pitfalls.md` #45 for the full
+pitfall and recurrence history.
+
 ### 2. Context Snapshot
 
 Collect:
@@ -219,6 +309,25 @@ Use a simple ensemble:
 - shrink toward market prior because national-team samples are small.
 
 Record `p_model`, model version, and uncertainty.
+
+**Comprehensive model presentation**: When the user asks for "全部模型" (all models),
+"超算数据汇总" (supercomputer data summary), or explicitly references external
+prediction sources (e.g., FootballForecast, Opta), present ALL available models
+side-by-side in a comparison table — never cherry-pick only the favorable or
+in-house models. Include:
+
+- Market-implied (Pinnacle Shin no-vig) — the authoritative benchmark
+- Our Path C Dixon-Coles grid fit — the in-house descriptive model
+- Naive Poisson (if computed) — with suppression caveat when applicable
+- Elo prior — with freshness caveat
+- External models found via web search (FootballForecast, Opta Supercomputer, etc.)
+  — clearly labeled as external with source URL
+
+Always flag which models are suppressed/unreliable and which are benchmarks.
+External models that significantly deviate from market pricing (e.g.,
+FootballForecast giving Qatar 23% vs market 6.2%) must be accompanied by an
+explanation of the likely divergence cause (Elo calibration differences,
+Poisson assumption limits, league-quality data contamination).
 
 **p_model 的 calibration gate**（Phase 1 DC Integration）：
 p_model 直接从 `reports/artifacts/model-{match_id}-{window}.json` 读取，
@@ -456,6 +565,12 @@ pick opportunity.
 Rules:
 
 - `T-72h_early` is the main structural edge window.
+- **T-24h_confirm structural limitation**: Path A cross-book scan will not find
+  edges in this window because the sharp market (Pinnacle) is already efficient.
+  No soft book beats Pinnacle at T-24h. A clean 0-edge result is expected and
+  correct — it means the market is working. Edge at this window can only come
+  from material information asymmetry (confirmed lineup, late injury news), not
+  from price scanning.
 - When hours-to-kickoff exceeds 84, use `T-{N}d_early_structural` with
   `N = ceil(hours_to_kickoff / 24)`. `report_contract.py` enforces hour
   ranges per window name; a mismatch blocks the manifest.
@@ -465,6 +580,19 @@ Rules:
   `qualified_play`.
 - `T-60m_lineup_final` and `T-45m_price_guard` replace the old `T-1h` terminal
   check.
+- **Late-window force-refresh**: `wc26-odds-broad-scan` auto-detects fixtures
+  in T-60m/T-45m windows via `has_late_window_fixtures()` and force-refreshes
+  odds regardless of TTL. These windows exist to capture the latest price;
+  cached reuse defeats their purpose. See pitfall #40 in
+  `references/direct-report-pitfalls.md`.
+- **Cross-window price drift**: When re-analyzing a match that already has an
+  earlier report (e.g., T-9d early-structural), always include a price drift
+  summary comparing the current snapshot against the earlier window. Include
+  no-vig probability shifts in percentage points for all three 1X2 outcomes
+  and the AH line. This helps readers interpret market movement direction
+  (e.g., "Netherlands -2.2pp since T-9d → money came for Japan/draw side")
+  and validates whether the earlier report's read still holds. See pitfall #47
+  in `references/direct-report-pitfalls.md`.
 - If lineup is required and still missing at `T-45m`, cap at `watch` or block.
 - Every report must record `timing_class`, `information_event`,
   `entry_time_utc`, and `entry_price` so CLV can be graded by timing class.
@@ -513,6 +641,173 @@ python skills/odds-analysis/scripts/calibration_gate.py proposal.yaml --mode app
 
 `calibration_gate.py` PASS plus human approval is required. A proposal in
 `PENDING` state is reviewable but not applicable.
+
+## Post-Match Review Workflow
+
+When the user asks for post-match review (复盘), or after matches settle and
+grading cards exist, follow this procedure. The goal is process evaluation, not
+result-based tuning.
+
+**BATCH-FIRST DISCIPLINE**: The user almost always wants ALL available matches,
+not just one. When the request is "复盘近日已结束的比赛" or "复盘今天的", scan
+the full grading card directory and fixture registry to identify the target set
+first. Never review one match and wait for the user to ask for more — that
+wastes turns and frustrates.
+
+**DATE-FIRST GATE**: When the user says "今天" or implies recency, the first
+action is `date -u` to establish current UTC, then filter fixtures by kickoff
+date. Matches from previous days are NOT the user's target unless they
+explicitly broaden the scope.
+
+### Step 0: Run coverage_scan.py (replaces old multi-step dance)
+
+```bash
+python3 /root/.hermes/profiles/wc26-handicap-analyst/skills/odds-analysis/scripts/coverage_scan.py \
+  --from $(date -u +%Y-%m-%d) --pending-only
+```
+
+This single command scans all data islands and outputs every match's coverage
+status (report, manifest, crossbook, consistency, audit, deep-research, grading
+card, review). See `## Script Entry Points → coverage_scan.py` for details.
+
+### Step 1: Load Grading Cards
+
+Grading cards live under `grading/cards/grade-*.json`. Each card has:
+
+- `football_data_id`, `home`, `away`, `result`, `actual_margin`, `actual_outcome`
+- `report_path`, `manifest_path` — back-links to the original analysis
+- `final_status`, `source_quality_cap`, `timing_class`, `window`
+- `closing_odds_snapshot`, `closing_snapshot_captured_at_utc`
+- `closing_quality` — `clean` (<60min before KO) or `degraded` (60-240min)
+- `match_context_flags` — red cards, stoppage events, etc.
+- `scoreline_profile` — where the actual score ranked in Path C top scores
+
+**Pitfall — daily-reflect may miss late-day grading cards**: The daily-reflect's
+`grading_aggregates` filters by `graded_at_utc == today`, but the cron runs at
+15:30 UTC. Cards graded after 15:30 UTC on the same date are permanently missed.
+When doing post-match review, always load ALL grading cards from disk, not just
+what the daily-reflect reported. See `references/daily-reflect-grading-gap.md`.
+
+**Pitfall — grading card identity mismatch**: The automated grading script may
+bind the wrong `report_path` or `raw_match_id` to a card. Always verify that
+the card's `home`/`away` and `football_data_id` match the report it claims to
+reference. If they don't match, flag the error and use fixture data as ground
+truth. See `references/post-match-review.md` for a concrete example (M001).
+
+### Step 2: Extract Report Odds
+
+From the original report, read the Pinnacle 1X2 odds and no-vig probabilities
+(Shin method). Also note the AH and totals lines if present.
+
+### Step 3: Extract Closing Odds
+
+From the closing snapshot referenced in the grading card, extract Pinnacle
+1X2. The snapshot path is in `closing_odds_snapshot`. Parse with:
+
+```python
+import json
+with open(closing_snapshot_path) as f:
+    snap = json.load(f)
+for m in snap['data']:
+    if m['home_team'] == home:
+        for bm in m['bookmakers']:
+            if bm['key'] == 'pinnacle':
+                # extract h2h, spreads, totals
+```
+
+**Pitfall — degraded closing quality**: If `closing_quality` is `degraded`
+(snapshot 1-4h before KO), the closing line may not reflect true market close.
+Mention this in the review. CLV numbers from degraded closes are directional
+at best.
+
+**Pitfall — CLV N/A when report snapshot IS the closing snapshot**: In T-45m_price_guard
+and other late windows, the report snapshot often doubles as the "closing" snapshot
+in the grading card (same file path in both `report` and `closing_odds_snapshot`).
+When this happens, `clv_raw` will be `null` and there is no independent closing
+line. Handle this case explicitly:
+
+- Write: `CLV: N/A — report snapshot ≈ closing snapshot (no independent close exists)`.
+- The primary hindsight check becomes **counterfactual EV/Kelly** from Step 4, not CLV.
+- If `closing_quality` is `degraded` and the closing snapshot matches the report
+  snapshot, also note the structural gap: no snapshot within 60min of KO exists.
+  This was the case for M003 (closing 58min before KO, same snapshot) and M004
+  (closing 178min before KO, same snapshot).
+
+Do not fabricate CLV numbers by comparing the report snapshot against itself
+(always zero) or by using a post-KO snapshot as the closing line.
+
+### Step 4: Compute Metrics
+
+For each match, compute:
+
+1. **CLV**: Compare report Pinnacle odds to closing Pinnacle odds.
+   - Direction: did the market move toward or away from the report's
+     probability?
+   - Magnitude: compute Shin no-vig probability shift (in percentage points).
+   - For NO PLAY reports (no edge claimed): note direction of market movement
+     relative to actual result as a market-efficiency signal.
+
+2. **Brier score**: `(1 - p_outcome)^2 + sum((0 - p_other)^2)` using Shin
+   no-vig probabilities from the report snapshot.
+
+3. **Counterfactual**: Even in hindsight, compute whether the report's edge
+   detection *should* have fired. Use the formula:
+   ```
+   Kelly_full = (odds × p_shin - 1) / (odds - 1)
+   ```
+   If Kelly is negative at the report price, the NO PLAY was correct even
+   if the outcome happened.
+
+4. **Scoreline profile check**: Did the actual score appear in Path C's top
+   scores? What was its probability rank?
+
+**4.5. Mark as reviewed**: After completing the formal review for a match, mark
+it in the review tracker so future scans skip it automatically:
+
+```bash
+python3 /root/.hermes/profiles/wc26-handicap-analyst/skills/odds-analysis/scripts/review_tracker.py \
+  --mark-reviewed --football-data-id <id> --summary "batch review YYYY-MM-DD"
+```
+
+This writes to `grading/reviews/completed.json`. The next `--list-pending` call
+will exclude it. Do this for every match in the batch after the review is
+complete.
+
+### Step 5: Process Quality Assessment
+
+Rate each match on these dimensions:
+
+| Dimension | Question |
+|-----------|----------|
+| False positive | Did we claim edge where none existed? |
+| False negative | Should we have detected edge that was there? |
+| Source quality | Was data fresh enough for the window? |
+| Market read | Did we correctly diagnose market efficiency? |
+| Timing discipline | Was the window appropriate for the conclusion? |
+
+### Step 6: Output Format
+
+Present in Chinese with clear sections:
+- 比赛结果 (Match result with score, HT, key events)
+- 我们做了什么 (What reports existed, conclusions)
+- 赔率走势 (Odds movement from report to close)
+- CLV 判决 (CLV assessment)
+- 概率校准 (Brier scores)
+- 反事实检查 (Counterfactual: even in hindsight, was there edge?)
+- 过程评价 (Process quality)
+- 可操作教训 (Actionable lessons)
+
+### Structural Limitations to Acknowledge
+
+- **Path A cannot find edges in T-24h confirm window**: The sharp market is
+  already efficient. Cross-book scan only fires when a soft book misprices
+  relative to Pinnacle. At T-24h, no soft book beats Pinnacle.
+- **T-72h early is the main edge window**: Stale snapshots are the #1 risk.
+  If the T-72h collector cron didn't run, source_quality drops to C and
+  the window is effectively lost.
+- **Closing snapshots may be degraded**: True closing line data requires a
+  snapshot within 60min of kickoff. Degraded closes (1-4h before KO) give
+  directional CLV only.
 
 ## Report Template
 
@@ -874,10 +1169,24 @@ review-required: qualified_play needs human approval; see report_path
 - `scripts/snapshot_resolver.py`: selects reusable snapshots by window/reuse group/TTL without spending quota.
 - `scripts/report_contract.py`: validates numeric provenance before report completion.
 - `scripts/report_guard.py`: validates Markdown report headers, simulation mode, manifest, and relay safety.
+- `scripts/coverage_scan.py`: **单一事实来源 — 比赛覆盖度扫描器**。输入日期范围，扫描所有数据孤岛（fixtures, .md reports, manifests, artifacts, grading cards, reviews），输出每场比赛的完整覆盖矩阵。复盘前必须先跑这个。
+- `scripts/review_tracker.py`: post-match review completion tracking; reads/writes `grading/reviews/completed.json`. Use `--list-pending` to find unreviewed grading cards AND FINISHED-uncarded matches, `--mark-reviewed` after completing a formal review. `--self-test` runs poison test (TIMED fixtures must not leak into uncarded).
 - `scripts/calibration_gate.py`: validate calibration proposals before approved apply.
 
 ## Reference Files
 
 - `references/artifact-chain.md`: artifact chain and pipeline overview.
+- `references/fast-path-manifest-template.md`: **minimum viable manifest template for NO PLAY fast path** — copy-paste starter with field checklist, common first-attempt errors, and post-write actions. Use this instead of building manifests from scratch when 0 edges exist.
 - `references/contract-guard-pitfalls.md`: report_contract and report_guard pitfalls.
-- `references/direct-report-pitfalls.md`: collected pitfalls from live direct report sessions (window naming, huge-favorite matches, source_quality_cap sync, cross-book anchor detection, manifest provides).
+- `references/direct-report-pitfalls.md`: collected pitfalls from live direct report sessions (window naming, huge-favorite matches, source_quality_cap sync, cross-book anchor detection, manifest provides, fast-path procedures, mechanism_audit not_run classification, odds-broad-scan cron gap, T-45m/T-60m late-window force-refresh, LO boundary vacuum, contract-level test coverage requirements).
+- `references/script-pitfalls.md`: script CLI argument footguns (fixture_registry, devig, consistency_triangle, cross_book_scan, snapshot_resolver).
+- `references/fast-path-gap.md`: structural mismatch between cross_book_scan.py output (nested line_groups) and report_contract.py validator (flat market fields). Expected on NO PLAY fast path.
+- `references/post-match-review.md`: concrete post-match review findings from the first two settled WC26 matches (M001 Mexico 2-0 South Africa, M002 South Korea 2-1 Czechia). Includes CLV numbers, Brier scores, grading card bug documentation, and Path A structural limitation confirmation.
+- `references/post-match-review-m003-m004.md`: M003 (Canada 1-1 Bosnia) and M004 (USA 4-1 Paraguay) post-match findings. Key lessons: CLV N/A when report=closing snapshot, counterfactual Kelly as fallback, Path C scoreline hit/miss analysis, and Brier single-match fluctuation context.
+- `references/post-match-review-m009.md`: M009 (Germany 7-1 Curaçao) post-match findings.
+- `references/post-match-review-batch-7.md`: **batch post-match review pattern and 7-match aggregate findings (2026-06-15).** Documents the one-heredoc batch-analysis technique, 7-match summary table, counterfactual EV for all 1X2 sides, Brier interpretation framework, and key takeaways: zero positive EV across all matches, 5/7 market direction accuracy, overround as structural enemy, totals line as weakest link. Key lessons: extreme favorites (~93% implied) produce trivially low Brier scores — the real test is whether all markets (1X2, AH, Totals) were correctly identified as negative EV; tail-event results don't invalidate NO PLAY; compute counterfactual EV for ALL market sides, not just the winner; known grading-card gap where `scoreline_profile.source` can be `"missing"` even when Path C artifact exists.
+- `references/cron-jobs.md`: WC26 cron job registry with schedules, paid API details, cache reuse logic, and pause/resume operations. Updated 2026-06-13: `wc26-odds-broad-scan` tightened to `*/15 * * * *` with `has_late_window_fixtures()` auto-force-refresh for T-45m/T-60m windows.
+- `references/daily-reflect-grading-gap.md`: daily-reflect `grading_aggregates` date-filter bug — grading cards written after the daily-reflect run (15:30 UTC) but on the same UTC date are permanently missed by the "today" filter. M003 (Canada 1-1 Bosnia) was the first observed casualty.
+- `references/model-beats-market-gate.md`: pattern where Dixon-Coles outperforms market pricing but calibration gate correctly blocks actionable. Canonical example: Brazil 1-1 Morocco (M005). Single-match accuracy ≠ edge; requires 25+ graded matches for calibration proposal.
+- `references/historical-odds-extraction.md`: bulk multi-window (T-72h→T-60m) Pinnacle odds extraction recipe. Documents team-name normalization pitfall (Czechia≠Czech Republic, USA≠United States, Bosnia-Herzegovina≠Bosnia & Herzegovina), snapshot filename timestamp parsing with inconsistent `Z` suffix, and the full extraction→no-vig→drift recipe for post-match CLV packaging.
+- `references/web-result-gap.md`: web search and browser fallback systematically fail to return definitive match results from ESPN, BBC, FIFA, Sofascore, Flashscore. Documented during M010 (Netherlands vs Japan) post-match analysis. Trust our own grading pipeline, not search snippets.
