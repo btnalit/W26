@@ -747,8 +747,13 @@ For each match, compute:
    - For NO PLAY reports (no edge claimed): note direction of market movement
      relative to actual result as a market-efficiency signal.
 
-2. **Brier score**: `(1 - p_outcome)^2 + sum((0 - p_other)^2)` using Shin
-   no-vig probabilities from the report snapshot.
+2. **Brier score**: `Σ(p_i - o_i)²` where o_i=1 for the actual outcome, 0
+   otherwise. Range [0, 2]. Compute using Shin no-vig probabilities from the
+   report snapshot. ALWAYS include uniform 3-way baseline (0.6667) and
+   brier_skill_vs_uniform (= Brier - baseline; negative = better than
+   uniform). Never present Brier without baseline — bare absolute Brier
+   invites narrative-over-numbers. See `uniform_three_way_brier_baseline()` in
+   `wc26_cron_payload.py`.
 
 3. **Counterfactual**: Even in hindsight, compute whether the report's edge
    detection *should* have fired. Use the formula:
@@ -792,7 +797,7 @@ Present in Chinese with clear sections:
 - 我们做了什么 (What reports existed, conclusions)
 - 赔率走势 (Odds movement from report to close)
 - CLV 判决 (CLV assessment)
-- 概率校准 (Brier scores)
+- 概率校准 (Brier score + uniform baseline + brier_skill_vs_uniform)
 - 反事实检查 (Counterfactual: even in hindsight, was there edge?)
 - 过程评价 (Process quality)
 - 可操作教训 (Actionable lessons)
