@@ -526,7 +526,8 @@ def build_role_artifact(manifest: dict[str, Any], manifest_path: Path) -> dict[s
     manifest_id = str(manifest.get("manifest_id") or manifest_path.name)
     match_id = manifest.get("match_id") or (manifest.get("match") or {}).get("match_id") or "UNKNOWN"
     artifact_id = f"role_engine:{match_id}:{stable_slug(manifest_id + '|' + ENGINE_VERSION)}"
-    return {
+    scoring_claim = derive_scoring_claim(conclusions, ctx)
+    artifact = {
         "artifact_id": artifact_id,
         "artifact_type": "role_engine",
         "artifact_kind": "role_engine",
@@ -549,6 +550,9 @@ def build_role_artifact(manifest: dict[str, Any], manifest_path: Path) -> dict[s
             if item.get("decision") != "BLOCKED"
         ],
     }
+    if scoring_claim:
+        artifact["scoring_claim"] = scoring_claim
+    return artifact
 
 
 def patch_manifest(manifest_path: Path, output_path: Path, artifact: dict[str, Any]) -> None:
@@ -575,6 +579,67 @@ def patch_manifest(manifest_path: Path, output_path: Path, artifact: dict[str, A
     if isinstance(gates, dict):
         gates["role_engine"] = "pass"
     write_json(manifest_path, manifest)
+
+
+def derive_scoring_claim(conclusions: list[dict[str, Any]], ctx: dict[str, Any]) -> dict[str, Any] | None:
+    """Derive a single scoring_claim from role conclusions for post-match grading.
+
+    Only emits a claim when a conclusion is CONFIRMED or SUSPECT with a
+    falsifiable directional statement.  Returns None when no scorable claim exists.
+    """
+    # Priority order: trap > public_bias > market_efficiency
+    for item in conclusions:
+        role = str(item.get("role") or "")
+        decision = str(item.get("decision") or "")
+        if role == "trap_risk" and decision == "SUSPECT":
+            # Trap on side: extract from the interpretation text
+            interpretation = str(item.get("interpretation_zh") or "")
+            # Determine which side is the trap target
+            favorite = str(ctx.get("favorite_side") or "home")
+            trap_side = favorite  # default: trap targets the favorite
+            return {
+                "dimension": "role_engine",
+                "claim_type": "trap_on_side_X",
+                "directional_statement": interpretation[:200],
+                "falsifiable_by": "trap_side_not_covered",
+                "scorable": True,
+                "trap_side": trap_side,
+                "post_result_verdict": None,
+            }
+        if role == "public_bias" and decision == "CONFIRMED":
+            # public overload on favorite
+            favorite = str(ctx.get("favorite_side") or "home")
+            return {
+                "dimension": "role_engine",
+                "claim_type": "retail_overload_side_X",
+                "directional_statement": f"散户拥挤在{favorite}侧 → {favorite}实际表现应差于市场定价",
+                "falsifiable_by": "favorite_covered_main_handicap",
+                "scorable": True,
+                "overload_side": favorite,
+                "post_result_verdict": None,
+            }
+        if role == "market_efficiency" and decision == "CONFIRMED":
+            return {
+                "dimension": "role_engine",
+                "claim_type": "market_efficient",
+                "directional_statement": "市场无明显误价 → 赛果应落在画像top概率区",
+                "falsifiable_by": "outcome_in_top_probs",
+                "scorable": True,
+                "post_result_verdict": None,
+            }
+    # Fallback: if no CONFIRMED/SUSPECT, check if any favorite_protected signal exists
+    for item in conclusions:
+        role = str(item.get("role") or "")
+        if role == "bookmaker_intent" and str(item.get("decision")) == "CONFIRMED":
+            return {
+                "dimension": "role_engine",
+                "claim_type": "favorite_protected",
+                "directional_statement": "庄家保护热门 → 热门方应赢盘",
+                "falsifiable_by": "favorite_covers_main_handicap",
+                "scorable": True,
+                "post_result_verdict": None,
+            }
+    return None
 
 
 def render_markdown_section(artifact: dict[str, Any]) -> str:

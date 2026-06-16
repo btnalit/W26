@@ -1,0 +1,12 @@
+{
+  "schema_version": "wc26.dimension_scoring_config.v2",
+  "dimension_sample_thresholds": {
+    "role_engine": 20,
+    "bias_mirror": 20,
+    "no_play_classifier": 20,
+    "motivation_context": 8
+  },
+  "default_threshold": 20,
+  "cross_tournament_accumulation": true,
+  "VALUE_INTERPRETATION_IS_HUMAN_ONLY": true
+}

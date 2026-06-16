@@ -330,7 +330,7 @@ def analyze_motivation_context(
     snapshot_id = "standings:" + _stable_hash({"standings": standings, "fixtures": group_remaining_fixtures})
     ledger_ref = "motivation-ledger-" + _stable_hash({"match": match_under_analysis, "snapshot": snapshot_id})[:8]
 
-    return {
+    result = {
         "artifact_field": "motivation_context",
         "contract": CONTRACT,
         "matchday": int(matchday),
@@ -345,6 +345,25 @@ def analyze_motivation_context(
         "market_reflection_check": market_reflection,
         "ledger_ref": ledger_ref,
     }
+
+    # Derive scoring_claim for post-match grading
+    claim_type_map = {
+        "MUTUAL_DRAW_INCENTIVE": "mutual_draw_incentive",
+        "ROTATION_VS_DESPERATION": "rotation_vs_desperation",
+        "MUTUAL_DESPERATION": "mutual_desperation",
+    }
+    if situation_tag in claim_type_map:
+        claim_type = claim_type_map[situation_tag]
+        direction = str(model_hint.get("direction", ""))
+        result["scoring_claim"] = {
+            "dimension": "motivation_context",
+            "claim_type": claim_type,
+            "directional_statement": direction,
+            "falsifiable_by": f"situation_tag:{situation_tag}",
+            "scorable": True,
+            "post_result_verdict": None,
+        }
+    return result
 
 
 def market_reflection_check(

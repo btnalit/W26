@@ -32,6 +32,7 @@ STATE_DIR = WORKSPACE / "state"
 GRADING_DIR = WORKSPACE / "grading"
 GRADING_CARDS_DIR = GRADING_DIR / "cards"
 PATH_C_LEDGER_DIR = GRADING_DIR / "path_c_signal_ledger"
+DIMENSION_SCORE_LEDGER_PATH = GRADING_DIR / "dimension_score_ledger.json"
 
 
 WINDOW_SPECS = [
@@ -72,6 +73,10 @@ DEVIG = load_module(
 NO_PLAY_CLASSIFIER = load_module(
     "no_play_classifier",
     SCRIPT_DIR.parent / "skills" / "odds-analysis" / "scripts" / "no_play_classifier.py",
+)
+DIMENSION_SCORER = load_module(
+    "dimension_scorer",
+    SCRIPT_DIR.parent / "skills" / "odds-analysis" / "scripts" / "dimension_scorer.py",
 )
 
 
@@ -551,6 +556,32 @@ def remove_superseded_path_c_ledgers(entry: dict[str, Any]) -> list[str]:
             path.unlink()
             removed.append(str(path))
     return removed
+
+
+def collect_scoring_artifacts_from_manifest(
+    report_manifest: dict[str, Any],
+    report_manifest_path: pathlib.Path | None,
+) -> dict[str, Any]:
+    """Collect dimension artifacts that carry scoring_claim from a manifest.
+
+    Returns a dict keyed by dimension name, each value is the artifact payload
+    that contains a scoring_claim.
+    """
+    artifacts: dict[str, Any] = {}
+    for art in report_manifest.get("artifacts", []):
+        if not isinstance(art, dict):
+            continue
+        caps = artifact_caps(art)
+        # Map capability names to dimension names
+        for cap, dim_name in [("role_engine", "role_engine"),
+                              ("bias_mirror", "bias_mirror"),
+                              ("motivation_context", "motivation_context"),
+                              ("no_play_classification", "no_play_classifier")]:
+            if cap in caps and dim_name not in artifacts:
+                payload = load_artifact_payload(art, report_manifest_path)
+                if isinstance(payload, dict) and payload.get("scoring_claim"):
+                    artifacts[dim_name] = payload
+    return artifacts
 
 
 def canonical_match_id_for_fixture(fm: dict[str, Any], fallback: str, fixture_path: pathlib.Path) -> str:
@@ -1874,6 +1905,25 @@ def postmatch_grade() -> int:
             )
             write_path_c_signal_ledger(ledger_entry)
             remove_superseded_path_c_ledgers(ledger_entry)
+
+        # --- Dimension scoring: judge scoring_claims against settled result ---
+        scoring_artifacts = collect_scoring_artifacts_from_manifest(report_manifest, report_manifest_path)
+        if scoring_artifacts:
+            settled_result = {
+                "actual_outcome": actual_outcome,
+                "actual_margin": actual_margin,
+                "actual_total_goals": actual_total_goals,
+                "actual_over25": actual_over25,
+                "favorite_side": favorite_side,
+                "favorite_covered_main_handicap": favorite_covered_main_handicap,
+                "home_score": int(score_h),
+                "away_score": int(score_a),
+            }
+            dim_records = DIMENSION_SCORER.score_dimensions(
+                match_id_value, settled_result, scoring_artifacts,
+            )
+            if dim_records:
+                DIMENSION_SCORER.write_ledger_records(dim_records, DIMENSION_SCORE_LEDGER_PATH)
 
         # --- Write Section 11 to report ---
         new_text = text

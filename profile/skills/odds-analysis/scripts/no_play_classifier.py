@@ -65,7 +65,7 @@ def classify_no_play(
         kind = "directional_blocked"
         rationale = f"DR给出明确方向({direction}),但Path A零可执行价格 → 看对方向缺执行面"
         direction_out = direction
-    return {
+    result = {
         "artifact_field": "no_play_classification",
         "contract": "wc26.no_play_classification.v1",
         "type": kind,
@@ -74,6 +74,27 @@ def classify_no_play(
         "post_result_direction_hit": None,
         "footnote_zh": "NO PLAY分类·描述性;directional_blocked 表示分析层有方向、执行层无价格,非下注信号。",
     }
+    # scoring_claim tail: only when directional_blocked
+    if kind == "directional_blocked" and direction_out:
+        # Determine claim_type from direction
+        dir_low = direction_out.lower()
+        if "under" in dir_low:
+            ct = "retail_overload_side_X"  # directional_blocked = market pricing not aligned with direction
+        elif "over" in dir_low:
+            ct = "retail_overload_side_X"
+        elif "受让" in direction_out or "dog" in dir_low:
+            ct = "trap_on_side_X"
+        else:
+            ct = "retail_overload_side_X"
+        result["scoring_claim"] = {
+            "dimension": "no_play_classifier",
+            "claim_type": ct,
+            "directional_statement": direction_out,
+            "falsifiable_by": "post_result_direction_hit",
+            "scorable": True,
+            "post_result_verdict": None,
+        }
+    return result
 
 
 def backfill_direction_hit(classification: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:

@@ -96,6 +96,41 @@ def _read_text(alignment: str, dimension: str, confidence: str) -> str:
     return "画像与阶段先验未形成有效同向/反向关系"
 
 
+def _derive_scoring_claim_from_mirrors(mirrors: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Derive a scoring_claim when bias_mirror has a CONTRADICTS alignment.
+
+    Only emits when alignment == 'CONTRADICTS' and confidence != 'provisional_low_n'.
+    This is the directional statement: the discounted side is the opposite of
+    what the profile predicts.
+    """
+    for mirror in mirrors:
+        if mirror.get("alignment") != "CONTRADICTS":
+            continue
+        if mirror.get("confidence") == "provisional_low_n":
+            continue
+        profile = str(mirror.get("profile_says") or "").lower()
+        # Determine which direction was discounted
+        if "over" in profile:
+            direction = "画像偏Over, 但阶段偏Under → Over倾向打折"
+            discount_toward = "under"
+        elif "under" in profile:
+            direction = "画像偏Under, 但阶段偏Over → Under倾向打折"
+            discount_toward = "over"
+        else:
+            direction = f"画像方向与阶段偏差相反 → {mirror.get('profile_says')}打折"
+            discount_toward = "unknown"
+        return {
+            "dimension": "bias_mirror",
+            "claim_type": "profile_lean_discounted",
+            "directional_statement": direction,
+            "falsifiable_by": "actual_outcome_vs_discounted_direction",
+            "scorable": True,
+            "discount_toward": discount_toward,
+            "post_result_verdict": None,
+        }
+    return None
+
+
 def analyze_bias_mirror(market_profile: dict[str, Any] | None, phase_context: dict[str, Any] | None) -> dict[str, Any]:
     profile = deepcopy(market_profile or {})
     phase = phase_context or {}
@@ -128,9 +163,13 @@ def analyze_bias_mirror(market_profile: dict[str, Any] | None, phase_context: di
         "confidence": fav_conf,
     })
 
-    return {
+    result = {
         "artifact_field": "bias_mirror",
         "contract": "wc26.bias_mirror.v1",
         "mirrors": mirrors,
         "footnote_zh": "偏差校正镜·只读对照·不修改画像·非下注信号;反向仅表示可信度降低,不构成反向下注理由。",
     }
+    scoring_claim = _derive_scoring_claim_from_mirrors(mirrors)
+    if scoring_claim:
+        result["scoring_claim"] = scoring_claim
+    return result
