@@ -1,0 +1,11 @@
+{
+  "boundary_version": "v1",
+  "tiers": {
+    "even":     {"max": 0.20},
+    "moderate": {"min": 0.20, "max": 0.50},
+    "lopsided": {"min": 0.50}
+  },
+  "min_cell_sample": 15,
+  "opening_snapshot_preference": ["T-72h", "T-24h", "earliest_available"],
+  "note": "gap = max(p_home_shin, p_away_shin) - min(p_home_shin, p_away_shin) from earliest-available Pinnacle 1X2 snapshot. Boundaries are configurable; adjust as data accumulates."
+}

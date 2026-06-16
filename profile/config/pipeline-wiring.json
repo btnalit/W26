@@ -284,6 +284,20 @@
         }
       ],
       "notes": "Read-only dimension audit report from dimension_score_ledger. Outputs only raw data (hit_rate, n_scored, not_applicable_rate, sample_sufficient). Never emits removal judgments."
+    },
+    {
+      "capability": "strength_gap_audit",
+      "producer": "strength_gap_audit.py",
+      "orchestrators": [
+        {
+          "path": "profile/skills/odds-analysis/scripts/strength_gap_audit.py",
+          "generation_call_markers": [
+            "audit_by_strength_tier("
+          ],
+          "manifest_markers": []
+        }
+      ],
+      "notes": "Strength-gap stratified dimension score audit. Produces (dimension × tier) hit-rate matrix. Purely observational — never emits 'alpha is in close games' judgments."
     }
   ],
   "report_consumed_capabilities": [

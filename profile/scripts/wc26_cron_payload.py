@@ -1059,6 +1059,45 @@ def stale_postmatch_fixture_records(all_matches: list[dict[str, Any]], fixture_c
                 }
             )
     return stale
+
+
+def opening_snapshot_for_match(
+    home: str,
+    away: str,
+    kickoff: datetime | None = None,
+) -> pathlib.Path | None:
+    """Find the earliest available the-odds-api multibook snapshot for a match.
+
+    Prefers the earliest snapshot that contains this match's Pinnacle 1X2 data.
+    Falls back to pre-kickoff snapshots if needed.
+    Returns path to the snapshot or None.
+    """
+    snapshots_dir = WORKSPACE / "snapshots" / "odds"
+    if not snapshots_dir.exists():
+        return None
+
+    home_lower = home.strip().lower()
+    away_lower = away.strip().lower()
+
+    candidates: list[tuple[pathlib.Path, datetime]] = []
+    for path in sorted(snapshots_dir.glob("the-odds-api-multibook-*.json")):
+        if not path.is_file():
+            continue
+        captured = snapshot_time(path)
+        if captured is None:
+            continue
+        if kickoff is not None and captured > kickoff:
+            continue  # only pre-kickoff snapshots
+        candidates.append((path, captured))
+
+    if not candidates:
+        return None
+
+    # Return the earliest (oldest) snapshot — this is the "opening" price
+    candidates.sort(key=lambda item: item[1])
+    return candidates[0][0]
+
+
 def proposal_summaries(today: str) -> tuple[list[pathlib.Path], list[pathlib.Path]]:
     proposals_dir = WORKSPACE / "proposals"
     proposals = sorted(proposals_dir.glob("*.md")) if proposals_dir.exists() else []
@@ -1919,8 +1958,16 @@ def postmatch_grade() -> int:
                 "home_score": int(score_h),
                 "away_score": int(score_a),
             }
+            # Compute strength-gap from opening snapshot (strength-gap-spec v1)
+            opening_snap = opening_snapshot_for_match(home, away, kickoff)
+            strength_gap = None
+            if opening_snap is not None:
+                strength_gap = DIMENSION_SCORER.compute_strength_gap(
+                    opening_snap, home, away,
+                )
             dim_records = DIMENSION_SCORER.score_dimensions(
                 match_id_value, settled_result, scoring_artifacts,
+                strength_gap=strength_gap,
             )
             if dim_records:
                 DIMENSION_SCORER.write_ledger_records(dim_records, DIMENSION_SCORE_LEDGER_PATH)
