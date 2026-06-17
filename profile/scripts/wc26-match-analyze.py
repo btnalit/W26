@@ -39,6 +39,7 @@ MATCH_REPORT_DIR = WORKSPACE / "reports" / "match"
 ARTIFACT_DIR = WORKSPACE / "reports" / "artifacts"
 TEMPLATE_PATH = SCRIPT_DIR.parent / "templates" / "report-template.md"
 SANPSHOT_HEALTH_DIR = WORKSPACE / "snapshots" / "health"
+LATE_WINDOWS = {"T-60m_lineup_final", "T-45m_price_guard"}
 
 
 # ── 工具 ──────────────────────────────────────────────────────────
@@ -515,6 +516,52 @@ def run_orchestrator(
     except subprocess.TimeoutExpired:
         print(f"[match-analyze]   consistency_triangle 超时", file=sys.stderr)
 
+    # ── Step 4.5: late_fade_check (T-60m / T-45m only) ──
+    fade_artifact_entry: dict[str, Any] | None = None
+    if window in LATE_WINDOWS:
+        fade_output = output_dir / f"fade-{match_id}-{stable_id(captured_at)}.json"
+        fade_cmd = [
+            PYTHON, str(SKILL_SCRIPTS / "late_fade_check.py"),
+            "--snapshot", str(snapshot_path),
+            "--match-home", match_home,
+            "--match-away", match_away,
+            "--match-id", match_id,
+            "--window", window,
+            "--kickoff-utc", kickoff_utc,
+            "--output", str(fade_output),
+        ]
+        try:
+            fade_ret = subprocess.run(fade_cmd, capture_output=True, text=True, timeout=60)
+            if fade_ret.returncode == 0 and fade_output.exists():
+                fade_result = read_json(fade_output, {})
+                fade_status = fade_result.get("status", "skipped")
+                fade_signal = (fade_result.get("signal") or {}) if isinstance(fade_result.get("signal"), dict) else {}
+                fade_detected = fade_signal.get("fade_detected", False)
+                fade_summary = fade_result.get("summary_zh", "")
+                fade_artifact_entry = {
+                    "artifact_id": f"late_fade:{match_id}:{stable_id(captured_at)}",
+                    "path": str(fade_output.resolve()),
+                    "provides": ["late_fade_check"],
+                    "artifact_type": "late_fade_check",
+                    "status": fade_status,
+                    "fade_detected": fade_detected,
+                    "fade_summary_zh": fade_summary,
+                }
+                manifest.setdefault("artifacts", []).append(fade_artifact_entry)
+                manifest.setdefault("analysis_gates", {})["late_fade_check"] = {
+                    "status": "pass",
+                    "fade_detected": fade_detected,
+                    "summary_zh": fade_summary,
+                }
+                write_json(manifest_path, manifest)
+                tag = "⚠ FADE" if fade_detected else "ok"
+                print(f"[match-analyze]   late_fade: {fade_output.name}  status={fade_status}  fade={fade_detected}  {tag}")
+            else:
+                err = (fade_ret.stderr or fade_ret.stdout or "late_fade_check failed").strip()[:300]
+                print(f"[match-analyze]   late_fade stderr: {err}", file=sys.stderr)
+        except subprocess.TimeoutExpired:
+            print(f"[match-analyze]   late_fade 超时", file=sys.stderr)
+
     # ── Step 5: role_engine (Path D price-side game context) ──
     role_path = output_dir / f"role-engine-{match_id}-{stable_id(captured_at)}.json"
     role_cmd = [
@@ -697,6 +744,13 @@ def generate_report(
     for a in manifest.get("artifacts", []):
         if isinstance(a, dict):
             lines.append(f"- `{Path(a['path']).name}` provides={a.get('provides', '?')}")
+
+    # ── Late fade signal (T-60m / T-45m only) ──
+    fade_gate = (manifest.get("analysis_gates") or {}).get("late_fade_check")
+    if fade_gate and isinstance(fade_gate, dict):
+        fade_summary = fade_gate.get("summary_zh", "")
+        if fade_summary:
+            lines.extend(["", "## 临场褪水检查 (Late Fade Check)", "", fade_summary, ""])
 
     if health_note:
         lines.extend(["", f"⚠️ {health_note}"])
